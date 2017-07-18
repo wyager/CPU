@@ -7,7 +7,7 @@ We will also pretend that RAM access is instantaneous. We will deal with realist
 The fact that we're writing this CPU in Haskell instead of in an HDL like Verilog means that there will be substantial stylistic differences from how CPUs are normally written. However, almost all of these differences make it vastly simpler and faster to write CPUs in Haskell. The downside is that the generated hardware isn't (yet) as space-efficient as hand-rolled circuitry. It's sort of like the difference between writing optimized assembly by hand versus using a high-level language. However, as compiler technology improves, we can close the efficiency gap, save a lot of human labor, and write less buggy hardware.
 
 \begin{code}
-module Main where
+module CPU where
 
 import CLaSH.Sized.Unsigned (Unsigned)
 import CLaSH.Sized.Vector (Vec((:>), Nil), (!!), replace, repeat, (++))
@@ -24,8 +24,6 @@ import Prelude (Show, print, (+), (-), (*), (==), ($), (.), filter, fmap, Bool(T
 import Control.DeepSeq (NFData, rnf)
 
 import Data.Maybe (Maybe(Just,Nothing))
-
-main = print R1
 \end{code}
 
 
@@ -648,11 +646,11 @@ module main();
     reg reset_reg;
     wire reset = reset_reg;
 
-    wire halt = 0;
-    wire output_valid = 0;
+    wire halt;
+    wire output_valid;
     wire [63:0] output_data;
 
-    % Main_topEntity evaluator(clk, reset, halt, output_valid, output_data);
+    Main_topEntity evaluator(clk, reset, halt, output_valid, output_data);
     
     always@(posedge clk) begin
         if (output_valid == 1) begin
