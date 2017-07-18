@@ -106,6 +106,7 @@ Finally, we'll add a "Halt" instruction, which will halt the CPU.
 
 \begin{code}
     | Halt
+    deriving Show
 \end{code}
 
 Next, we'll define the possible activities our CPU can be engaged in:
@@ -142,7 +143,7 @@ We're also going to have our unrealistic 1kiB internal "RAM" which can finish a 
 
 
 \begin{code}
-data RAM = RAM (Vec 1024 Word)
+data RAM = RAM (Vec 128 Word)
 \end{code}
 
 
@@ -179,8 +180,8 @@ increment (Ptr address) = Ptr (address + 1)
 Now we have to write code to encode and decode instructions.
 
 \begin{code}
-encode :: Instruction -> Word
-encode instr = Word $ unpack $ case instr of
+encodeInstruction :: Instruction -> Word
+encodeInstruction instr = Word $ unpack $ case instr of
     LoadIm r v -> tag 0 ++# encodeReg r ++# pack v          -- Pad with zeros
     Add  a b d -> tag 1 ++# encodeReg a ++# encodeReg b ++# encodeReg d ++# 0
     Sub  a b d -> tag 2 ++# encodeReg a ++# encodeReg b ++# encodeReg d ++# 0
@@ -431,8 +432,8 @@ simpleProgram =
 And let's compile it into memory:
 
 \begin{code}
-simpleProgramMem :: Vec 1024 Word
-simpleProgramMem = fmap encode simpleProgram ++ repeat (Word 0)
+simpleProgramMem :: Vec 128 Word
+simpleProgramMem = fmap encodeInstruction simpleProgram ++ repeat (Word 0)
 \end{code}
 
 Let's generate CPU hardware with this program pre-loaded:
@@ -502,8 +503,8 @@ loopProgram =
     Halt         :>
     Nil
 
-loopProgramMem :: Vec 1024 Word
-loopProgramMem = fmap encode loopProgram ++ repeat (Word 0)
+loopProgramMem :: Vec 128 Word
+loopProgramMem = fmap encodeInstruction loopProgram ++ repeat (Word 0)
 
 loopProgramCPU :: Signal (Bool, Maybe Output)
 loopProgramCPU = cpuHardware defaultCPUState (RAM loopProgramMem)
@@ -537,13 +538,13 @@ And let's make a program that puts the first 20 fibonacci terms in RAM. We'll us
 fibProgram :: Vec 27 Instruction
 fibProgram
     =  LoadIm R1 0          -- Store the first 2 terms (0,1) in RAM
-    :> LoadIm R2 0x100
+    :> LoadIm R2 0x20
     :> Store R1 R2
     :> LoadIm R1 1
-    :> LoadIm R2 0x101
+    :> LoadIm R2 0x21
     :> Store R1 R2
     :> LoadIm R3 0          -- Loop counter
-    :> LoadIm R2 0x100      -- Start of loop. Load fibonacci array base address
+    :> LoadIm R2 0x20       -- Start of loop. Load fibonacci array base address
     :> Add R2 R3 R2         -- Get the address of the current first term (R2 + R3)
     :> Load R4 R2           -- Load the first item into R4
     :> LoadIm R1 1 
@@ -568,8 +569,8 @@ fibProgram
     haltAddr = 26
     loopStart = 7
 
-fibProgramMem :: Vec 1024 Word
-fibProgramMem = fmap encode fibProgram ++ repeat (Word 0)
+fibProgramMem :: Vec 128 Word
+fibProgramMem = fmap encodeInstruction fibProgram ++ repeat (Word 0)
 
 fibProgramCPU :: Signal (Bool, Maybe Output)
 fibProgramCPU = cpuHardware defaultCPUState (RAM fibProgramMem)
@@ -617,44 +618,43 @@ topEntity :: Signal (Bit, Bit, BitVector 64)
 topEntity = fmap hardwareTranslate fibProgramCPU
 \end{code}
 
-To compile the CPU, we just run `clash --verilog Main.lhs`.
+To compile the CPU, we just run `clash --verilog CPU.lhs`.
 
-This generates a bunch of `.v` files in `./verilog/Main`.
+This generates a bunch of `.v` files in `./verilog/CPU`.
 
 We use the following Verilog file (call it `cpu.v`) to run our CPU hardware:
 
 ```verilog
-`timescale 1ps/1ps
-
+`timescale 1ns/1ns
 
 module main();
 
+    // Toggle the reset line
     initial begin
-        reset_reg = 0;
-        reset_reg = #1 1;
+        reset_reg = 1;
+        reset_reg = #1 0;
+        reset_reg = #2 1;
     end
-
-    // clock
-    reg theClock = 1;
-    wire clk;
-    assign clk = theClock;
-    always begin
-        #500;
-        theClock = !theClock;
-    end
-
     reg reset_reg;
     wire reset = reset_reg;
+    
+    // Clock line
+    reg theClock = 0;
+    assign clk = theClock;
+    always begin
+        #50;
+        theClock = !theClock;
+    end
 
     wire halt;
     wire output_valid;
     wire [63:0] output_data;
 
-    Main_topEntity evaluator(clk, reset, halt, output_valid, output_data);
+    CPU_topEntity evaluator(clk, reset, halt, output_valid, output_data);
     
     always@(posedge clk) begin
         if (output_valid == 1) begin
-            $display("%H", output_data);
+            $display("0x%h", output_data);
         end else begin
             $display(".");
         end
@@ -672,11 +672,11 @@ This prints the output data if there is any or a dot if there isn't any.
 To compile the iverilog simulation, run
 
 ```bash
-iverilog -o cpu cpu.v verilog/main/*.v
+iverilog -o cpu -s main cpu.v verilog/CPU/*.v
 ```
 
 And to run it, run
 
 ```bash
-timeout 5 ./cpu
+timeout 10 ./cpu
 ```
