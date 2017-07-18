@@ -618,3 +618,67 @@ Now we can apply this function to our stream of CPU output values to get a strea
 topEntity :: Signal (Bit, Bit, BitVector 64)
 topEntity = fmap hardwareTranslate fibProgramCPU
 \end{code}
+
+To compile the CPU, we just run `clash --verilog Main.lhs`.
+
+This generates a bunch of `.v` files in `./verilog/Main`.
+
+We use the following Verilog file (call it `cpu.v`) to run our CPU hardware:
+
+```verilog
+`timescale 1ps/1ps
+
+
+module main();
+
+    initial begin
+        reset_reg = 0;
+        reset_reg = #1 1;
+    end
+
+    // clock
+    reg theClock = 1;
+    wire clk;
+    assign clk = theClock;
+    always begin
+        #500;
+        theClock = !theClock;
+    end
+
+    reg reset_reg;
+    wire reset = reset_reg;
+
+    wire halt = 0;
+    wire output_valid = 0;
+    wire [63:0] output_data;
+
+    % Main_topEntity evaluator(clk, reset, halt, output_valid, output_data);
+    
+    always@(posedge clk) begin
+        if (output_valid == 1) begin
+            $display("%H", output_data);
+        end else begin
+            $display(".");
+        end
+    end
+
+    always@(posedge clk) begin
+        if (halt == 1) $finish;
+    end
+
+endmodule
+```
+
+This prints the output data if there is any or a dot if there isn't any.
+
+To compile the iverilog simulation, run
+
+```bash
+iverilog -o cpu cpu.v verilog/main/*.v
+```
+
+And to run it, run
+
+```bash
+timeout 5 ./cpu
+```
