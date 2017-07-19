@@ -1,16 +1,39 @@
-Today, we're going to build a simple CPU. We're going to write it in Haskell and compile it to hardware.
+== [Blog](yager.io)
 
-This CPU design is an extremely simple serial state machine. It's easily 50x slower than an optimized CPU running at the same clock rate. We'll start with this simple design to get a handle on the problem, and switch to more complicated (but faster) designs in later installments.
+= Building a CPU
+
+== Part 1
+
+Today, we're going to build a simple CPU. We're going to write it in Haskell and use CLaSH to compile it to hardware.
+
+This entire webpage is a literate Haskell file. You can grab it [here](https://yager.io/CPU/Part1/CPU.lhs).
+
+To load the file into an interactive REPL, [install CLaSH](http://www.clash-lang.org) and run `clashi CPU.lhs`.
+
+If you want to simulate the Verilog hardware code or actually put it on an FPGA, there are more detailed instructions towards the end of the tutorial.
+
+
+== About This CPU
+
+This CPU design is an extremely simple serial state machine. It's easily 5-10x slower than an optimized CPU running at the same clock rate. We'll start with this simple design to get a handle on the problem, and switch to more complicated (but faster) designs in later installments.
 
 We will also pretend that RAM access is instantaneous. We will deal with realistic RAM in later installments.
 
-The fact that we're writing this CPU in Haskell instead of in an HDL like Verilog means that there will be substantial stylistic differences from how CPUs are normally written. However, almost all of these differences make it vastly simpler and faster to write CPUs in Haskell. The downside is that the generated hardware isn't (yet) as space-efficient as hand-rolled circuitry. It's sort of like the difference between writing optimized assembly by hand versus using a high-level language. However, as compiler technology improves, we can close the efficiency gap, save a lot of human labor, and write less buggy hardware.
+The fact that we're writing this CPU in Haskell instead of in an HDL like Verilog means that there will be substantial stylistic differences from how CPUs are normally written. However, almost all of these differences make it vastly simpler and faster to write hardware. The downside is that the generated hardware isn't (yet) as space-efficient as expertly hand-rolled circuitry. It's sort of like the difference between writing optimized assembly by hand versus using a high-level language. Hopefully as compiler technology improves, we can close the efficiency gap, save a lot of human labor, and write less buggy hardware.
+
+== The Code
+
+=== Code Part 1: Imports
+
+First we're just going to import a bunch of stuff. 
 
 \begin{code}
 module CPU where
 
+-- CLaSH-provided hardware stuff
 import CLaSH.Sized.Unsigned (Unsigned)
-import CLaSH.Sized.Vector (Vec((:>), Nil), (!!), replace, repeat, (++))
+import CLaSH.Sized.Vector (Vec((:>), Nil), 
+        (!!), replace, repeat, (++))
 import CLaSH.Class.Resize (zeroExtend)
 import CLaSH.Sized.BitVector (BitVector, (++#), Bit)
 import CLaSH.Class.BitPack (pack, unpack)
@@ -19,13 +42,18 @@ import CLaSH.Promoted.Nat.Literals as Nat
 import CLaSH.Signal (Signal, register, sample)
 
 -- Plain old Haskell stuff
-import Prelude (Show, print, (+), (-), (*), (==), ($), (.), filter, fmap, Bool(True,False), not, take, mapM_)
+import Prelude (Show, print, (+), (-), (*), (==), 
+    ($), (.), filter, take, fmap, mapM_,
+    Bool(True,False), not, Maybe(Just,Nothing))
 
+-- Used to make sure that something is fully evaluated.
+-- Good for making sure that our circuit 
+-- doesn't have any undefined behavior.
 import Control.DeepSeq (NFData, rnf)
-
-import Data.Maybe (Maybe(Just,Nothing))
 \end{code}
 
+
+=== Code Part 2: Some CPU-related Types
 
 Our CPU will have 4 64-bit registers. We'll identify them by a register number.
 
@@ -33,29 +61,31 @@ Our CPU will have 4 64-bit registers. We'll identify them by a register number.
 data Register = R1 | R2 | R3 | R4 deriving Show
 \end{code}
 
-We'll define a custom type for 64-bit memory addresses:
+We'll define a wrapper type for 64-bit memory addresses:
 
 \begin{code}
 data Ptr = Ptr (Unsigned 64) deriving (Show)
 \end{code}
 
-A custom type for 64-bit memory words:
+A wrapper type for 64-bit memory words:
 
 \begin{code}
 data Word = Word (Unsigned 64) deriving Show
 \end{code}
 
-As well as a custom type for 64-bit I/O output:
+As well as a wrapper type for 64-bit I/O output:
 
 \begin{code}
 data Output = Output (Unsigned 64) deriving Show
 -- Making Output an instance of NFData allows CLaSH 
---  to force full CPU evaluation during testing.
+--  to force full evaluation during testing.
 instance NFData Output where
     rnf (Output n) = rnf n
 \end{code}
 
-These all have the same underlying 64-bit representation, so the type is just to help us keep track of whether something is a value or a pointer to a value.
+These all have the same underlying 64-bit representation, so the wrapper is just to help us keep track of whether something is a value or a pointer to a value or whatever.
+
+=== Code Part 3: Instruction Set
 
 Let's define our instruction set. The first instruction is to load a 56-bit immediate value into a register.
 
@@ -70,15 +100,10 @@ The second instruction is to add two registers and put the result into a third r
     | Add Register Register Register
 \end{code}
 
-And the same for subtraction:
+And the same for subtraction and multiplication:
 
 \begin{code}
     | Sub Register Register Register
-\end{code}
-
-And integer multiplication:
-
-\begin{code}
     | Mul Register Register Register
 \end{code}
 
@@ -109,7 +134,9 @@ Finally, we'll add a "Halt" instruction, which will halt the CPU.
     deriving Show
 \end{code}
 
-Next, we'll define the possible activities our CPU can be engaged in:
+=== Code Part 4: CPU State and RAM
+
+Next, we'll define all the possible states of our CPU:
 
 \begin{code}
 data CPUActivity
@@ -139,16 +166,15 @@ The total state of our CPU is the combination of those two things.
 data CPUState = CPUState CPUActivity Registers
 \end{code}
 
-We're also going to have our unrealistic 1kiB internal "RAM" which can finish a read or write request in the same cycle it was dispatched. Technically you could do this in real hardware, but it would be fairly expensive and would slow down your maximum clock rate by a lot. Real internal RAM takes at least one cycle to complete an operation, and external RAM usually takes multiple cycles. We'll deal with that next time.
+We're also going to have a 512B internal "RAM" which can finish a read or write request in the same cycle it was dispatched. You can do this in real hardware, but it is fairly expensive and slows down your maximum clock rate by a lot. Real internal RAM takes at least one cycle to complete an operation, and external RAM usually takes multiple cycles. We'll deal with that in the next installment.
 
 
 \begin{code}
-data RAM = RAM (Vec 128 Word)
+data RAM = RAM (Vec 64 Word)
 \end{code}
 
 
-
-We'll write a few helper functions that let us perform basic hardware operations, like reading and writing from registers and RAM.
+We'll write a few helper functions that let us perform basic state operations, like reading and writing from registers and RAM.
 
 \begin{code}
 readRegister :: Registers -> Register -> Unsigned 64
@@ -177,7 +203,15 @@ increment :: Ptr -> Ptr
 increment (Ptr address) = Ptr (address + 1)
 \end{code}
 
-Now we have to write code to encode and decode instructions.
+=== Code Part 5: Machine Code Format
+
+Now we have to write code to encode and decode instructions to/from a 64-bit binary machine code format.
+
+The format is very simple:
+
+* The first 4 bits are the instruction ID ("tag")
+* The second, third, fourth 4 bits are register numbers. We could use 2 bits (as we only have 4 registers), but I'm leaving room for more registers later.
+* The last 56 bits are the immediate value, in the case of `LoadIm`.
 
 \begin{code}
 encodeInstruction :: Instruction -> Word
@@ -193,9 +227,12 @@ encodeInstruction instr = Word $ unpack $ case instr of
     Out      v -> tag 8 ++# encodeReg v                                 ++# 0
     Halt       -> tag 9                                                 ++# 0
 
+-- This is just for clarity, and to specify how many bits a tag should be.
 tag :: BitVector 4 -> BitVector 4
 tag x = x
 
+-- We could have up to 16 regs (0 through 15),
+--  but we're only using 4 for now.
 encodeReg :: Register -> BitVector 4
 encodeReg R1 = 1
 encodeReg R2 = 2
@@ -229,7 +266,9 @@ decodeReg 4 = R4
 
 \end{code}
 
-Our entire CPU can be described by a function that takes the CPU state and the RAM contents, and returns a new CPU state, RAM contents, maybe an output, and whether the CPU is halted. Again, this is fairly unrealistic; in hardware, this corresponds to copying over the entire RAM every clock cycle. It can be done, but it's wasteful, so we're only going to do it in this first CPU.
+=== Code Part 6: CPU Logic
+
+Our entire CPU logic can be described by a function that takes the current CPU state/RAM contents and returns a new CPU state/RAM contents. In hardware, this corresponds to copying over the entire RAM every clock cycle. It can be done, but it's wasteful, so we're only going to do it in this first CPU.
 
 
 \begin{code}
@@ -237,8 +276,7 @@ cycle :: (CPUState, RAM) -> (CPUState, RAM)
 cycle (CPUState activity registers, ram) = case activity of
 \end{code}
 
-Depending on the CPU's current activity, we do different things. If the CPU is currently `LoadingInstruction`, we simply read the instruction from RAM and decode it. In future (more realistic) CPUs, this will happen over multiple cycles. For now, it happens in one cycle. After reading the instruction, we return a new state where the CPU is `ExecutingInstruction`. We also increment the program counter register `pc` by one.
-
+Depending on the CPU's current state, we do different things. If the CPU is currently `LoadingInstruction`, we simply read the instruction from RAM and decode it. In future (more realistic) CPUs, this will happen over multiple cycles. For now, it happens in one cycle. After reading the instruction, we return a new state where the CPU is `ExecutingInstruction`. We also increment the program counter register `pc` by one.
 
 \begin{code}
     LoadingInstruction -> (CPUState activity' registers', ram)
@@ -282,7 +320,7 @@ If the CPU is currently `ExecutingInstruction`, we inspect the instruction and p
 We don't have to actually implement integer addition, subtraction, and multiplication ourselves at the circuit level; these are pre-defined primitives in HDLs that hardware compilers know how to optimize aggressively.
 
 
-For `Load` and `Store`, we will switch to the `ReadingMemory`/`WritingMemory` states. This isn't strictly necessary in our inefficient example hardware (we could perform a load or store in the same cycle as `ExecutingInstruction`, but I want to get us used to the idea of memory operations beign slow and requiring special consideration. We will perform the actual loads and stores in a separate step.
+For `Load` and `Store`, we will switch to the `ReadingMemory`/`WritingMemory` states. This isn't strictly necessary in our example hardware, as we could perform a load or store in the same cycle as `ExecutingInstruction`. However, I want to get us used to the idea of memory operations beign slow and requiring special consideration.
 
 
 \begin{code}
@@ -363,7 +401,11 @@ output (CPUState (Outputting output) _) = Just output
 output _                                = Nothing
 \end{code}
 
-OK, now we're going to define how the CPU lives in hardware. Our CPU hardware is going to take some initial CPU state and emit an infinite stream of `Bool`s (for whether the CPU has halted) and `Maybe Output`s (for any outputs the CPU might emit).
+=== Code Part 7: Hardware Structure
+
+Now we're going to define how the CPU lives in hardware. 
+
+The output of our CPU is a stream of `Bool`s (for whether the CPU has halted) and `Maybe Output`s (for any outputs the CPU might emit). We get to pick the CPU's initial state and RAM contents.
 
 \begin{code}
 cpuHardware :: CPUState -> RAM -> Signal (Bool, Maybe Output)
@@ -371,7 +413,9 @@ cpuHardware initialCPUState initialRAM = outputSignal
     where
 \end{code}
 
-First, we're going to put the CPU state and RAM contents into a hardware register, which is usually implemented in hardware  as a D-type flip-flop. This is one of the unrealistic aspects I was talking about earlier; D-type flip-flops are expensive, so you wouldn't actually use them for RAM. However, they are very fast, which allows us to do the same-cycle RAM accesses this design uses.
+First, we're going to put the CPU state and RAM contents into a hardware register, which is composed of transistor-level memory cells. CLaSH provides a `register` function which takes the initial register contents and the input signal to the register (which the register reads into itself at the start of every clock cycle), and returns the output signal of the register (which is just a copy of the register's contents).
+
+(Note: While registers are a kind of hardware-level memory, they are different from RAM. In particular, they are much faster and much more expensive. At the transistor level, they are usually built out of D-type flip-flops.)
 
 \begin{code}
     systemState = register (initialCPUState, initialRAM) systemState'
@@ -383,14 +427,26 @@ Every cycle, we are going to replace the old `systemState` with a new state, whi
     systemState' = fmap cycle systemState
 \end{code}
 
-That part might seem a bit confusing because it's self-referential. Self-referential haskell code is how we make self-referential circuits, which is how you build hardware with memory. The output of the memory cells is being fed into an update function; at the beginning of every clock cycle, the memory cell updates itself with the output of the update function. 
+That part might seem a bit confusing because it's self-referential. Self-referential Haskell code is how we make self-referential circuits, which is how you build hardware with memory. The output of the register is being run through an update function, and the output of that is loaded into the register at the beginning of every clock cycle. If `s[t]` is the state at cycle `t`, then
 
 ```
- ---[cycle circuit]<---
-|                      |
-|                      |
-|                      |
- --->[memory cell]-----
+s[0] = (initialCPUState, initialRAM)
+s[1] = cycle s[0]
+s[2] = cycle s[1]
+...
+```
+
+This is what the actual circuit will end up looking like:
+
+```
+ ----[cycle]<---
+|               |
+|               |
+|               |
+ -->[register]--
+        ^
+        |
+      clock
 ```
 
 Now we have to take the state of the CPU, extract the relevant information from the state, and output that information.
@@ -400,7 +456,7 @@ Now we have to take the state of the CPU, extract the relevant information from 
     getOutput (state, _) = (isHalted state, output state)
 \end{code}
 
-Every cycle, our output signal should contain that information.
+Every cycle, our output signal should contain the output data for the new state.
 
 \begin{code}
     outputSignal = fmap getOutput systemState'
@@ -414,7 +470,12 @@ defaultCPUState :: CPUState
 defaultCPUState = CPUState LoadingInstruction (Registers 0 0 0 0 (Ptr 0))
 \end{code}
 
-OK, that's enough code for us to test our CPU in Haskell. Let's write a quick program in our assembly language:
+
+That's enough code for us to test our CPU in Haskell. Let's write some programs.
+
+=== Code Part 8: Programming the CPU
+
+Let's first write a very simple program that just outputs 7, 8, 9.
 
 \begin{code}
 simpleProgram :: Vec 7 Instruction
@@ -432,9 +493,11 @@ simpleProgram =
 And let's compile it into memory:
 
 \begin{code}
-simpleProgramMem :: Vec 128 Word
+simpleProgramMem :: Vec 64 Word
 simpleProgramMem = fmap encodeInstruction simpleProgram ++ repeat (Word 0)
 \end{code}
+
+We fill unused memory with a bunch of zeros.
 
 Let's generate CPU hardware with this program pre-loaded:
 
@@ -443,7 +506,7 @@ simpleProgramCPU :: Signal (Bool, Maybe Output)
 simpleProgramCPU = cpuHardware defaultCPUState (RAM simpleProgramMem)
 \end{code}
 
-Because CLaSH is a wrapper around plain old haskell, we can test our entire CPU design without ever having to put it in hardware. Let's use the `sample` function to get a list of the first 20 outputs from our CPU, one output per clock cycle.
+Because CLaSH is a wrapper around plain old Haskell, we can test our entire CPU design without ever having to put it in hardware. Let's use the `sample` function to get a list of the first 20 outputs from our CPU, one output per clock cycle.
 
 \begin{code}
 simpleProgramOutput :: [(Bool, Maybe Output)]
@@ -452,7 +515,7 @@ simpleProgramOutput = take 20 $ sample simpleProgramCPU
 
 Before we look at the output, let's take a moment to think about what we should expect.
 
-The CPU starts out in `LoadingInstruction`, so it shouldn't output anything the first cycle. The second cycle, it executes the first `LoadIm` in the `ExecutingInstruction` state. Then, it goes back to `LoadingInstruction`. So each `LoadIm` takes 1 cycle to load and one cycle to execute. So we should first expect 5 cycles with no output.
+The CPU starts out in `LoadingInstruction`, so it shouldn't output anything the first cycle. The second cycle, it executes the first `LoadIm` in the `ExecutingInstruction` state. Then, it goes back to `LoadingInstruction`. So each `LoadIm` takes one cycle to load and one cycle to execute. So we should first expect 5 cycles with no output, and then we're back to a `LoadingInstruction`.
 
 Then, for each `Out` instruction, the CPU has to go through a `LoadingInstruction`, then an `ExecutingInstruction`, then an `Outputting` state. So for every `Out`, there should be two cycles with no output and one cycle with an output. So we should spend 9 cycles on `Out`s.
 
@@ -503,7 +566,7 @@ loopProgram =
     Halt         :>
     Nil
 
-loopProgramMem :: Vec 128 Word
+loopProgramMem :: Vec 64 Word
 loopProgramMem = fmap encodeInstruction loopProgram ++ repeat (Word 0)
 
 loopProgramCPU :: Signal (Bool, Maybe Output)
@@ -550,7 +613,7 @@ fibProgram
     :> LoadIm R1 1 
     :> Add R2 R1 R2         -- Get the address of the second item (R2 + R3 + 1)
     :> Load R1 R2           -- Load the second item into R1
-    :> Add R4 R1 R4         -- Add up the first and second items
+    :> Add R4 R1 R4         -- Add up the first and second items into R4
     :> LoadIm R1 1
     :> Add R2 R1 R2         -- Get the address of the new item (R2 + R3 + 2)
     :> Store R4 R2          -- Store the new item
@@ -569,7 +632,7 @@ fibProgram
     haltAddr = 26
     loopStart = 7
 
-fibProgramMem :: Vec 128 Word
+fibProgramMem :: Vec 64 Word
 fibProgramMem = fmap encodeInstruction fibProgram ++ repeat (Word 0)
 
 fibProgramCPU :: Signal (Bool, Maybe Output)
@@ -597,9 +660,11 @@ And indeed, we get
 
 Sweet! 
 
+=== Code Part 9: Interfacing With Hardware
+
 OK, now for the final step in today's tutorial: putting this thing in actual hardware.
 
-This part is pretty simple. First, we want to take the `Signal (Bool, Maybe Output)` stream from our CPU, which has an ambiguous/arbitrary bit-level representation, and transform it into a stream of something that has an unambiguous bit-level representation.
+This part is pretty simple. First, we want to take the `Signal (Bool, Maybe Output)` stream from our CPU, which has an ambiguous/arbitrary bit-level representation, and transform it into a stream of something that has an unambiguous bit-level representation. This will let us plug our CPU code into other hardware code, in the hardware language of our choice.
 
 \begin{code}
 hardwareTranslate :: (Bool, Maybe Output) -> (Bit, Bit, BitVector 64)
@@ -672,6 +737,7 @@ This prints the output data if there is any or a dot if there isn't any.
 To compile the iverilog simulation, run
 
 ```bash
+clash --verilog CPU.lhs
 iverilog -o cpu -s main cpu.v verilog/CPU/*.v
 ```
 
@@ -680,3 +746,10 @@ And to run it, run
 ```bash
 timeout 10 ./cpu
 ```
+
+After a couple seconds, you should start seeing CPU output!
+
+== Up Next
+
+In part 2, we're going to cover more realistic RAM behavior and CPU pipelining, which will bring us closer to modern processors.
+
