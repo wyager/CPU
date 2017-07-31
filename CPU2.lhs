@@ -13,6 +13,7 @@ As with last time, this entire webpage is a literate Haskell file. You can grab 
 Again, you can play with this file by [installing CLaSH](http://www.clash-lang.org) and running `clashi CPU.lhs`, and hardware simulation instructions are provided below.
 
 
+
 === About This CPU
 
 This CPU will have a pipelined design, which is much more efficient than the previous serial design. 
@@ -40,7 +41,7 @@ import CLaSH.Sized.Vector (Vec((:>), Nil),
 import CLaSH.Class.Resize (zeroExtend)
 import CLaSH.Sized.BitVector (BitVector, (++#), Bit)
 import CLaSH.Class.BitPack (pack, unpack)
-import CLaSH.Prelude (slice, mealy, moore)
+import CLaSH.Prelude (slice, mealy, moore, unbundle)
 import CLaSH.Promoted.Nat.Literals as Nat
 import CLaSH.Signal (Signal, register, sample)
 import CLaSH.Sized.Index (Index)
@@ -48,7 +49,7 @@ import CLaSH.Sized.Index (Index)
 -- Plain old Haskell stuff
 import Prelude (Show, print, (+), (-), (*), (==), 
     ($), (.), filter, take, fmap, mapM_, Functor,
-    Bool(True,False), not, Maybe(Just,Nothing))
+    Bool(True,False), not, Maybe(Just,Nothing), (<$>), (<*>))
 
 -- Used to make sure that something is fully evaluated.
 -- Good for making sure that our circuit 
@@ -119,25 +120,8 @@ We'll define the states of our four stages separately.
 \begin{code}
 
 data Validity = Valid | Invalid
-data Stall = Stall | Go
--- Fetch state.
--- Address of next instruction to read.
-data FetchState = FetchState {
-        nextPC :: Ptr DataRAM,
-        instractionRAMOutputValid :: Validity
-    }
+data Unused = Unused
 
-data DecodeState = DecodeState {
-        regs :: Vec 16 (Unsigned 64),
-        decodedInstruction :: Maybe (Instruction Word)
-    }
-
-data ExecuteState
-    = E_Store Register (Unsigned 64)
-    | E_ReadRAM Register
-    | E_Nop
-    | E_Out (Unsigned 64)
-    | E_Halt
 
 data WriteState
     = W_Store Register (Unsigned 64)
@@ -229,44 +213,161 @@ decodeReg = Register . unpack
 \end{code}
 
 \begin{code}
-data FetchHazard = F_Stall | F_Jump (Ptr DataRAM) | F_None
+data DtoF = D_F_Stall | D_F_Jump (Ptr CodeRAM) | D_F_None
 
-fetcher :: Signal FetchHazard -> Signal (Ptr DataRAM, Validity)
-fetcher = mealy out (FetchState (Ptr 0) Invalid)
+data FetchState = FetchState {
+        nextPC :: Ptr CodeRAM,
+        instructionRAMOutputValid :: Validity
+    }
+
+cpuBlock :: (state -> fromPrev -> fromNext -> fromRAM -> (state, toPrev, toRAM)) 
+         -> (state -> toNext) 
+         -> state 
+         -> (Signal fromPrev, Signal fromNext, Signal fromRAM)
+         -> (Signal toPrev, Signal toNext, Signal toRAM)
+cpuBlock update filter initial (fromPrev, fromNext, fromRAM) = (toPrev, toNext, toRAM)
     where
-    out :: FetchState -> FetchHazard -> (FetchState, (Ptr DataRAM, Validity))
-    out state@(FetchState ptr validity) hazard = (update state hazard, (ptr, validity))
+    state = register initial state'
+    (state', toPrev, toRAM) = unbundle (update <$> state <*> fromPrev <*> fromNext <*> fromRAM)
+    toNext = filter <$> state
+
+data CodeRAMRequest = CodeRAMStall | CodeRAMRead (Ptr CodeRAM)
+
+fetcher :: (Signal Unused, Signal DtoF, Signal Unused) 
+        -> (Signal Unused, Signal Validity, Signal CodeRAMRequest)
+fetcher = cpuBlock update filter (FetchState (Ptr 0) Invalid) 
+    where
+    update :: FetchState -> Unused -> DtoF -> Unused -> (FetchState, Unused, CodeRAMRequest)
+    update state@(FetchState ptr validity) Unused hazard Unused = (state', Unused, request)
         where
-        update state F_Stall      = FetchState (nextPC state) Invalid
-        update state (F_Jump ptr) = FetchState ptr Invalid
-        update state F_None       = FetchState (increment (nextPC state)) Valid
+        state' = case hazard of
+            D_F_Stall     -> state
+            D_F_Jump ptr' -> FetchState ptr' Invalid
+            D_F_None      -> FetchState (increment ptr) Valid
+        request = case hazard of
+            D_F_Stall -> CodeRAMStall
+            _         -> CodeRAMRead ptr
+    filter :: FetchState -> Validity
+    filter = instructionRAMOutputValid
 
 \end{code}
+
+
 
 \begin{code}
-data DecodeHazard = D_Stall | D_Jump (Ptr DataRAM) | D_None
-data RegWrite = RegWrite Register (Unsigned 64)
 
-fetcher :: Signal (DecodeHazard, Word) -> Signal (FetchHazard, Maybe (Instruction Word))
-fetcher = mealy update _
+data DecodeState = DecodeState {
+        regs :: Vec 16 (Unsigned 64),
+        decodedInstruction :: Maybe (Instruction (Unsigned 64))
+    }
+
+data EtoDHazard = E_D_Jump (Ptr CodeRAM) | E_D_Stall | E_D_None
+
+data CompletedWrite = CompletedWrite Register (Unsigned 64)
+
+data EtoD = EtoD EtoDHazard (Maybe CompletedWrite)
+
+
+decoder :: (Signal Validity, Signal EtoD, Signal Word)
+        -> (Signal DtoF, Signal (Maybe (Instruction (Unsigned 64))), Signal Unused)
+decoder = cpuBlock update filter (DecodeState (repeat 0) Nothing)
     where
-    update :: DecodeState 
-           -> (DecodeHazard, Validity, Word, Maybe RegWrite) 
-           -> (DecodeState, (FetchHazard, Maybe (Instruction Word)))
-    update state (hazard,fromRAM,writes) = case hazard of
-        D_Stall    -> (state', (F_Stall,)) 
-            where
-            state' = DecodeState regs' (decodedInstruction state)
-        D_Jump ptr -> (state', (F_Jump ptr,)) 
-            where
-            state' = DecodeState regs' Nothing
-        D_None     -> (state', (F_None,)) 
-            where
-            state' = DecodeState regs' $ Just 
-                                       $ fmap (readRegister regs') 
-                                       $ decodeInstruction fromRAM
+    update :: DecodeState -> Validity -> EtoD -> Word -> (DecodeState, DtoF, Unused)
+    update state validity eToD fromRAM = (state', dToF, Unused)
+        where
+        EtoD hazard completedWrite = eToD
+        regs' = case completedWrite of
+            Nothing -> regs state
+            Just (CompletedWrite reg val) -> writeRegister (regs state) reg val
+        decodedInstruction' = case hazard of
+            E_D_Stall  -> decodedInstruction state
+            E_D_Jump _ -> Nothing
+            E_D_None   -> case validity of
+                Invalid -> Nothing
+                Valid -> Just
+                       $ fmap (readRegister regs') 
+                       $ decodeInstruction fromRAM
+        state' = DecodeState regs' decodedInstruction'
+        dToF = case hazard of
+            E_D_Jump ptr -> D_F_Jump ptr
+            E_D_Stall    -> D_F_Stall
+            E_D_None     -> D_F_None
+    filter :: DecodeState -> Maybe (Instruction (Unsigned 64))
+    filter = decodedInstruction
 
 \end{code}
+
+
+\begin{code}
+
+data ExecuteState
+    = E_Store Register (Unsigned 64)
+    | E_ReadRAM Register
+    | E_Nop
+    | E_Out (Unsigned 64)
+    | E_Halt
+
+data WtoE = WtoE (Maybe CompletedWrite)
+
+data DataRAMRequest = Read (Ptr DataRAM)
+                    | Write (Ptr DataRAM) Word
+
+executer :: (Signal (Maybe (Instruction (Unsigned 64))), Signal WtoE, Signal Unused)
+        -> (Signal EtoD, Signal ExecuteState, Signal DataRAMRequest)
+executer = cpuBlock update filter E_Nop
+    where
+    update :: ExecuteState -> Maybe (Instruction (Unsigned 64)) -> WtoE -> Unused -> (ExecuteState, EtoD, DataRAMRequest)
+    update state decodedInstr (WtoE write) Unused = (state', eToD, request)
+        where
+        eToD = EtoD eToDHazard write
+        (eToDHazard, state') = case decodedInstr of
+            Nothing -> (E_D_None, E_Nop)
+            Just instr -> case instr of
+                LoadIm r v  -> (E_D_Stall, E_Store r (zeroExtend v))
+                Add a b r   -> (E_D_Stall, E_Store r (a + b))
+                Sub a b r   -> (E_D_Stall, E_Store r (a - b))
+                Mul a b r   -> (E_D_Stall, E_Store r (a * b))
+                Load r ptr  -> (E_D_Stall, E_ReadRAM r)
+                Store r ptr -> (E_D_None, E_Nop)
+                Jmp dest    -> (E_D_Jump (Ptr dest), E_Nop)
+                JmpZ r dest -> (if r == 0 then E_D_Jump (Ptr dest) else E_D_None, E_Nop)
+                Out v       -> (E_D_None, E_Out v)
+                Halt        -> (E_D_None, E_Halt)
+        request = case decodedInstr of
+            Just (Load _ ptr) -> Read (Ptr ptr)
+            Just (Store v ptr) -> Write (Ptr ptr) (Word v)
+            _ -> Read (Ptr 0) -- Could also have a special constructor for "do nothing" if we wanted
+    -- The write stage uses the entire execute state
+    filter :: ExecuteState -> ExecuteState
+    filter s = s
+
+\end{code}
+
+
+% \begin{code}
+% data DecodeHazard = D_Stall | D_Jump (Ptr DataRAM) | D_None
+% data RegWrite = RegWrite Register (Unsigned 64)
+
+% fetcher :: Signal (DecodeHazard, Word) -> Signal (FetchHazard, Maybe (Instruction Word))
+% fetcher = mealy update _
+%     where
+%     update :: DecodeState 
+%            -> (DecodeHazard, Validity, Word, Maybe RegWrite) 
+%            -> (DecodeState, (FetchHazard, Maybe (Instruction Word)))
+%     update state (hazard,fromRAM,writes) = case hazard of
+%         D_Stall    -> (state', (F_Stall,)) 
+%             where
+%             state' = DecodeState regs' (decodedInstruction state)
+%         D_Jump ptr -> (state', (F_Jump ptr,)) 
+%             where
+%             state' = DecodeState regs' Nothing
+%         D_None     -> (state', (F_None,)) 
+%             where
+%             state' = DecodeState regs' $ Just 
+%                                        $ fmap (readRegister regs') 
+%                                        $ decodeInstruction fromRAM
+
+% \end{code}
 
 % ==== CPU Logic
 
