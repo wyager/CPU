@@ -1,19 +1,19 @@
-== [Blog](yager.io)
+=== [Blog](https://yager.io)
 
-= Building a CPU
+== Building a CPU
 
-== Part 1
+=== Part 1
 
 Today, we're going to build a simple CPU. We're going to write it in Haskell and use CLaSH to compile it to hardware.
 
-This entire webpage is a literate Haskell file. You can grab it [here](https://yager.io/CPU/Part1/CPU.lhs).
+This entire webpage is a literate Haskell file. You can grab it [here](https://github.com/wyager/CPU/blob/master/CPU1.lhs).
 
-To load the file into an interactive REPL, [install CLaSH](http://www.clash-lang.org) and run `clashi CPU.lhs`.
+To load the file into an interactive REPL, [install CLaSH](http://www.clash-lang.org) and run `clashi CPU1.lhs`.
 
 If you want to simulate the Verilog hardware code or actually put it on an FPGA, there are more detailed instructions towards the end of the tutorial.
 
 
-== About This CPU
+=== About This CPU
 
 This CPU design is an extremely simple serial state machine. It's easily 5-10x slower than an optimized CPU running at the same clock rate. We'll start with this simple design to get a handle on the problem, and switch to more complicated (but faster) designs in later installments.
 
@@ -21,14 +21,14 @@ We will also pretend that RAM access is instantaneous. We will deal with realist
 
 The fact that we're writing this CPU in Haskell instead of in an HDL like Verilog means that there will be substantial stylistic differences from how CPUs are normally written. However, almost all of these differences make it vastly simpler and faster to write hardware. The downside is that the generated hardware isn't (yet) as space-efficient as expertly hand-rolled circuitry. It's sort of like the difference between writing optimized assembly by hand versus using a high-level language. Hopefully as compiler technology improves, we can close the efficiency gap, save a lot of human labor, and write less buggy hardware.
 
-== The Code
+=== The Code
 
-=== Code Part 1: Imports
+==== Imports
 
 First we're just going to import a bunch of stuff. 
 
 \begin{code}
-module CPU where
+module CPU1 where
 
 -- CLaSH-provided hardware stuff
 import CLaSH.Sized.Unsigned (Unsigned)
@@ -53,7 +53,7 @@ import Control.DeepSeq (NFData, rnf)
 \end{code}
 
 
-=== Code Part 2: Some CPU-related Types
+==== Some CPU-related Types
 
 Our CPU will have 4 64-bit registers. We'll identify them by a register number.
 
@@ -85,7 +85,7 @@ instance NFData Output where
 
 These all have the same underlying 64-bit representation, so the wrapper is just to help us keep track of whether something is a value or a pointer to a value or whatever.
 
-=== Code Part 3: Instruction Set
+==== Instruction Set
 
 Let's define our instruction set. The first instruction is to load a 56-bit immediate value into a register.
 
@@ -134,7 +134,7 @@ Finally, we'll add a "Halt" instruction, which will halt the CPU.
     deriving Show
 \end{code}
 
-=== Code Part 4: CPU State and RAM
+==== CPU State and RAM
 
 Next, we'll define all the possible states of our CPU:
 
@@ -203,7 +203,7 @@ increment :: Ptr -> Ptr
 increment (Ptr address) = Ptr (address + 1)
 \end{code}
 
-=== Code Part 5: Machine Code Format
+==== Machine Code Format
 
 Now we have to write code to encode and decode instructions to/from a 64-bit binary machine code format.
 
@@ -266,7 +266,7 @@ decodeReg 4 = R4
 
 \end{code}
 
-=== Code Part 6: CPU Logic
+==== CPU Logic
 
 Our entire CPU logic can be described by a function that takes the current CPU state/RAM contents and returns a new CPU state/RAM contents. In hardware, this corresponds to copying over the entire RAM every clock cycle. It can be done, but it's wasteful, so we're only going to do it in this first CPU.
 
@@ -401,7 +401,7 @@ output (CPUState (Outputting output) _) = Just output
 output _                                = Nothing
 \end{code}
 
-=== Code Part 7: Hardware Structure
+==== Hardware Structure
 
 Now we're going to define how the CPU lives in hardware. 
 
@@ -473,7 +473,7 @@ defaultCPUState = CPUState LoadingInstruction (Registers 0 0 0 0 (Ptr 0))
 
 That's enough code for us to test our CPU in Haskell. Let's write some programs.
 
-=== Code Part 8: Programming the CPU
+==== Programming the CPU
 
 Let's first write a very simple program that just outputs 7, 8, 9.
 
@@ -660,7 +660,7 @@ And indeed, we get
 
 Sweet! 
 
-=== Code Part 9: Interfacing With Hardware
+==== Interfacing With Hardware
 
 OK, now for the final step in today's tutorial: putting this thing in actual hardware.
 
@@ -683,11 +683,11 @@ topEntity :: Signal (Bit, Bit, BitVector 64)
 topEntity = fmap hardwareTranslate fibProgramCPU
 \end{code}
 
-To compile the CPU, we just run `clash --verilog CPU.lhs`.
+To compile the CPU, we just run `clash --verilog CPU1.lhs`.
 
-This generates a bunch of `.v` files in `./verilog/CPU`.
+This generates a bunch of `.v` files in `./verilog/CPU1`.
 
-We use the following Verilog file (call it `cpu.v`) to run our CPU hardware:
+We use the following Verilog file (call it `cpu1.v`) to run our CPU hardware:
 
 ```verilog
 `timescale 1ns/1ns
@@ -715,7 +715,7 @@ module main();
     wire output_valid;
     wire [63:0] output_data;
 
-    CPU_topEntity evaluator(clk, reset, halt, output_valid, output_data);
+    CPU1_topEntity cpu(clk, reset, halt, output_valid, output_data);
     
     always@(posedge clk) begin
         if (output_valid == 1) begin
@@ -737,8 +737,8 @@ This prints the output data if there is any or a dot if there isn't any.
 To compile the iverilog simulation, run
 
 ```bash
-clash --verilog CPU.lhs
-iverilog -o cpu -s main cpu.v verilog/CPU/*.v
+clash --verilog CPU1.lhs
+iverilog -o cpu -s main cpu1.v verilog/CPU1/*.v
 ```
 
 And to run it, run
@@ -747,9 +747,9 @@ And to run it, run
 timeout 10 ./cpu
 ```
 
-After a couple seconds, you should start seeing CPU output!
+You should start seeing CPU output!
 
-== Up Next
+=== Up Next
 
 In part 2, we're going to cover more realistic RAM behavior and CPU pipelining, which will bring us closer to modern processors.
 

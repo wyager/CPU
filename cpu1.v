@@ -11,7 +11,7 @@ module main();
     reg reset_reg;
     wire reset = reset_reg;
     
-    // 1GHz virtual clock
+    // Clock line
     reg theClock = 0;
     assign clk = theClock;
     always begin
@@ -23,7 +23,7 @@ module main();
     wire output_valid;
     wire [63:0] output_data;
 
-    CPU_topEntity evaluator(clk, reset, halt, output_valid, output_data);
+    CPU1_topEntity cpu(clk, reset, halt, output_valid, output_data);
     
     always@(posedge clk) begin
         if (output_valid == 1) begin
