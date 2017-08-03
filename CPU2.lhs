@@ -41,14 +41,14 @@ import CLaSH.Sized.Vector (Vec((:>), Nil),
 import CLaSH.Class.Resize (zeroExtend)
 import CLaSH.Sized.BitVector (BitVector, (++#), Bit)
 import CLaSH.Class.BitPack (pack, unpack)
-import CLaSH.Prelude (slice, mealy, moore, unbundle)
+import CLaSH.Prelude (slice, mealy, moore, bundle, unbundle)
 import CLaSH.Promoted.Nat.Literals as Nat
 import CLaSH.Signal (Signal, register, sample, signal, mux)
 import CLaSH.Sized.Index (Index)
 import CLaSH.Prelude.BlockRam (blockRam)
 
 -- Plain old Haskell stuff
-import Prelude (Show, print, (+), (-), (*), (==), 
+import Prelude (Show, Eq, print, (+), (-), (*), (==), (/=),
     ($), (.), filter, take, fmap, mapM_, Functor,
     Bool(True,False), not, Maybe(Just,Nothing), (<$>), (<*>), undefined)
 
@@ -139,9 +139,9 @@ We could also do it more like you would in Haskell, where the entire CPU is defi
 
 The advantage of the first approach is that it's easier to understand where your clock domains lie and the relative stabilization times of different parts of your circuit.
 
-The advantage of the second approach is that it's typically easier to analyze and has less syntactic and cognitive overhead.
+The advantage of the second approach is that it's typically easier to analyze and has less syntactic and cognitive overhead. It's also easier to debug because the entire state of your CPU is explicit.
 
-For this tutorial, I'm going to take the first approach with explicit wires to help us understand how we're physically breaking up the CPU into sub-circuits.
+For this tutorial, I'm going to take the first approach with explicit wires to help us understand how we're physically breaking up the CPU into sub-circuits. In general, I prefer the second approach, but this is up to personal preference.
 
 \begin{code}
 readRegister :: Vec 16 a -> Register -> a
@@ -245,24 +245,25 @@ connect ram blockB blockC inputs = (b2a, c2d, c2ram)
 
 
 
+
+
 data CodeRAMRequest = CodeRAMStall | CodeRAMRead (Ptr CodeRAM)
 
 fetcher :: (Signal Unused, Signal DtoF, Signal Unused) 
         -> (Signal Unused, Signal Validity, Signal CodeRAMRequest)
-fetcher = cpuBlock update filter (FetchState (Ptr 0) Invalid) 
+fetcher = cpuBlock fetcherUpdate fetcherFilter (FetchState (Ptr 0) Invalid) 
+fetcherUpdate :: FetchState -> Unused -> DtoF -> Unused -> (FetchState, Unused, CodeRAMRequest)
+fetcherUpdate state@(FetchState ptr validity) Unused hazard Unused = (state', Unused, request)
     where
-    update :: FetchState -> Unused -> DtoF -> Unused -> (FetchState, Unused, CodeRAMRequest)
-    update state@(FetchState ptr validity) Unused hazard Unused = (state', Unused, request)
-        where
-        state' = case hazard of
-            D_F_Stall     -> state
-            D_F_Jump ptr' -> FetchState ptr' Invalid
-            D_F_None      -> FetchState (increment ptr) Valid
-        request = case hazard of
-            D_F_Stall -> CodeRAMStall
-            _         -> CodeRAMRead ptr
-    filter :: FetchState -> Validity
-    filter = instructionRAMOutputValid
+    state' = case hazard of
+        D_F_Stall     -> state
+        D_F_Jump ptr' -> FetchState ptr' Invalid
+        D_F_None      -> FetchState (increment ptr) Valid
+    request = case hazard of
+        D_F_Stall -> CodeRAMStall
+        _         -> CodeRAMRead ptr
+fetcherFilter :: FetchState -> Validity
+fetcherFilter = instructionRAMOutputValid
 
 \end{code}
 
@@ -284,30 +285,31 @@ data EtoD = EtoD EtoDHazard (Maybe CompletedWrite)
 
 decoder :: (Signal Validity, Signal EtoD, Signal Word)
         -> (Signal DtoF, Signal (Maybe (Instruction (Unsigned 64))), Signal Unused)
-decoder = cpuBlock update filter (DecodeState (repeat 0) Nothing)
+decoder = cpuBlock decoderUpdate decoderFilter (DecodeState (repeat 0) Nothing)
+
+decoderUpdate :: DecodeState -> Validity -> EtoD -> Word -> (DecodeState, DtoF, Unused)
+decoderUpdate state validity eToD fromRAM = (state', dToF, Unused)
     where
-    update :: DecodeState -> Validity -> EtoD -> Word -> (DecodeState, DtoF, Unused)
-    update state validity eToD fromRAM = (state', dToF, Unused)
-        where
-        EtoD hazard completedWrite = eToD
-        regs' = case completedWrite of
-            Nothing -> regs state
-            Just (CompletedWrite reg val) -> writeRegister (regs state) reg val
-        decodedInstruction' = case hazard of
-            E_D_Stall  -> decodedInstruction state
-            E_D_Jump _ -> Nothing
-            E_D_None   -> case validity of
-                Invalid -> Nothing
-                Valid -> Just
-                       $ fmap (readRegister regs') 
-                       $ decodeInstruction fromRAM
-        state' = DecodeState regs' decodedInstruction'
-        dToF = case hazard of
-            E_D_Jump ptr -> D_F_Jump ptr
-            E_D_Stall    -> D_F_Stall
-            E_D_None     -> D_F_None
-    filter :: DecodeState -> Maybe (Instruction (Unsigned 64))
-    filter = decodedInstruction
+    EtoD hazard completedWrite = eToD
+    regs' = case completedWrite of
+        Nothing -> regs state
+        Just (CompletedWrite reg val) -> writeRegister (regs state) reg val
+    decodedInstruction' = case hazard of
+        E_D_Stall  -> Nothing
+        E_D_Jump _ -> Nothing
+        E_D_None   -> case validity of
+            Invalid -> Nothing
+            Valid -> Just
+                   $ fmap (readRegister regs') 
+                   $ decodeInstruction fromRAM
+    state' = DecodeState regs' decodedInstruction'
+    dToF = case hazard of
+        E_D_Jump ptr -> D_F_Jump ptr
+        E_D_Stall    -> D_F_Stall
+        E_D_None     -> D_F_None
+
+decoderFilter :: DecodeState -> Maybe (Instruction (Unsigned 64))
+decoderFilter = decodedInstruction
 
 \end{code}
 
@@ -328,32 +330,32 @@ data DataRAMRequest = Read (Ptr DataRAM)
 
 executer :: (Signal (Maybe (Instruction (Unsigned 64))), Signal WtoE, Signal Unused)
         -> (Signal EtoD, Signal ExecuteState, Signal DataRAMRequest)
-executer = cpuBlock update filter E_Nop
+executer = cpuBlock executerUpdate executerFilter E_Nop
+
+executerUpdate :: ExecuteState -> Maybe (Instruction (Unsigned 64)) -> WtoE -> Unused -> (ExecuteState, EtoD, DataRAMRequest)
+executerUpdate _ decodedInstr (WtoE write) Unused = (state', eToD, request)
     where
-    update :: ExecuteState -> Maybe (Instruction (Unsigned 64)) -> WtoE -> Unused -> (ExecuteState, EtoD, DataRAMRequest)
-    update _ decodedInstr (WtoE write) Unused = (state', eToD, request)
-        where
-        eToD = EtoD eToDHazard write
-        (eToDHazard, state') = case decodedInstr of
-            Nothing -> (E_D_None, E_Nop)
-            Just instr -> case instr of
-                LoadIm r v  -> (E_D_Stall, E_Store r (zeroExtend v))
-                Add a b r   -> (E_D_Stall, E_Store r (a + b))
-                Sub a b r   -> (E_D_Stall, E_Store r (a - b))
-                Mul a b r   -> (E_D_Stall, E_Store r (a * b))
-                Load r ptr  -> (E_D_Stall, E_ReadRAM r)
-                Store r ptr -> (E_D_None, E_Nop)
-                Jmp dest    -> (E_D_Jump (Ptr dest), E_Nop)
-                JmpZ r dest -> (if r == 0 then E_D_Jump (Ptr dest) else E_D_None, E_Nop)
-                Out v       -> (E_D_None, E_Out v)
-                Halt        -> (E_D_None, E_Halt)
-        request = case decodedInstr of
-            Just (Load _ ptr) -> Read (Ptr ptr)
-            Just (Store v ptr) -> Write (Ptr ptr) (Word v)
-            _ -> Read (Ptr 0) -- Could also have a special constructor for "do nothing" if we wanted
-    -- The write stage uses the entire execute state
-    filter :: ExecuteState -> ExecuteState
-    filter s = s
+    eToD = EtoD eToDHazard write
+    (eToDHazard, state') = case decodedInstr of
+        Nothing -> (E_D_None, E_Nop)
+        Just instr -> case instr of
+            LoadIm r v  -> (E_D_Stall, E_Store r (zeroExtend v))
+            Add a b r   -> (E_D_Stall, E_Store r (a + b))
+            Sub a b r   -> (E_D_Stall, E_Store r (a - b))
+            Mul a b r   -> (E_D_Stall, E_Store r (a * b))
+            Load r ptr  -> (E_D_Stall, E_ReadRAM r)
+            Store r ptr -> (E_D_None, E_Nop)
+            Jmp dest    -> (E_D_Jump (Ptr dest), E_Nop)
+            JmpZ r dest -> (if r == 0 then E_D_Jump (Ptr dest) else E_D_None, E_Nop)
+            Out v       -> (E_D_None, E_Out v)
+            Halt        -> (E_D_None, E_Halt)
+    request = case decodedInstr of
+        Just (Load _ ptr) -> Read (Ptr ptr)
+        Just (Store v ptr) -> Write (Ptr ptr) (Word v)
+        _ -> Read (Ptr 0) -- Could also have a special constructor for "do nothing" if we wanted
+-- The write stage uses the entire execute state
+executerFilter :: ExecuteState -> ExecuteState
+executerFilter s = s
 
 \end{code}
 
@@ -362,28 +364,27 @@ executer = cpuBlock update filter E_Nop
 data WriteState
     = W_Nop
     | W_Out (Unsigned 64)
-    | W_Halt deriving (Generic, Show)
+    | W_Halt deriving (Generic, Show, Eq)
 
 instance NFData WriteState
 
 
 writer :: (Signal ExecuteState, Signal Unused, Signal Word)
        -> (Signal WtoE, Signal WriteState, Signal Unused)
-writer = cpuBlock update filter W_Nop
+writer = cpuBlock writerUpdate writerFilter W_Nop
+writerUpdate :: WriteState -> ExecuteState -> Unused -> Word -> (WriteState, WtoE, Unused)
+writerUpdate _ executeState Unused fromRAM = (state', wToE, Unused)
     where
-    update :: WriteState -> ExecuteState -> Unused -> Word -> (WriteState, WtoE, Unused)
-    update _ executeState Unused fromRAM = (state', wToE, Unused)
-        where
-        state' = case executeState of
-            E_Out v -> W_Out v
-            E_Halt  -> W_Halt
-            _       -> W_Nop
-        wToE = case executeState of
-            E_Store r v -> WtoE (Just (CompletedWrite r v))
-            E_ReadRAM r -> let Word v = fromRAM in WtoE (Just (CompletedWrite r v))
-            _           -> WtoE Nothing
-    filter :: WriteState -> WriteState
-    filter s = s
+    state' = case executeState of
+        E_Out v -> W_Out v
+        E_Halt  -> W_Halt
+        _       -> W_Nop
+    wToE = case executeState of
+        E_Store r v -> WtoE (Just (CompletedWrite r v))
+        E_ReadRAM r -> let Word v = fromRAM in WtoE (Just (CompletedWrite r v))
+        _           -> WtoE Nothing
+writerFilter :: WriteState -> WriteState
+writerFilter s = s
 
 \end{code}
 
@@ -436,23 +437,101 @@ cpu code initialData = output
 
 
 \begin{code}
-program1 :: Vec 7 (Instruction Register)
-program1 =
-    LoadIm (Register 1) 7 :>
-    LoadIm (Register 2) 8 :>
-    LoadIm (Register 3) 9 :>
-    Out (Register 1)     :>
-    Out (Register 2)     :>
-    Out (Register 3)     :>
-    Halt        :>
-    Nil
+program1 :: Vec 27 (Instruction Register)
+program1
+    =  LoadIm (Register 1) 0     
+    :> LoadIm (Register 2) 0x20
+    :> Store (Register 1) (Register 2)
+    :> LoadIm (Register 1) 1
+    :> LoadIm (Register 2) 0x21
+    :> Store (Register 1) (Register 2)
+    :> LoadIm (Register 3) 0     
+    :> LoadIm (Register 2) 0x20  
+    :> Add (Register 2) (Register 3) (Register 2)         -- Get the address of the current first term ((Register 2) + (Register 3))
+    :> Load (Register 4) (Register 2)           -- Load the first item into (Register 4)
+    :> LoadIm (Register 1) 1 
+    :> Add (Register 2) (Register 1) (Register 2)         -- Get the address of the second item ((Register 2) + (Register 3) + 1)
+    :> Load (Register 1) (Register 2)           -- Load the second item into (Register 1)
+    :> Add (Register 4) (Register 1) (Register 4)         -- Add up the first and second items into (Register 4)
+    :> LoadIm (Register 1) 1
+    :> Add (Register 2) (Register 1) (Register 2)         -- Get the address of the new item ((Register 2) + (Register 3) + 2)
+    :> Store (Register 4) (Register 2)          -- Store the new item
+    :> Out (Register 4)               -- Print the new item
+    :> LoadIm (Register 1) 19
+    :> Sub (Register 1) (Register 3) (Register 1)         -- (Register 1) = 19 - loop count
+    :> LoadIm (Register 2) haltAddr   -- (Register 2) = Halt address
+    :> JmpZ (Register 1) (Register 2)           -- Halt if (Register 1) == 0 (i.e. if loop count is 19)
+    :> LoadIm (Register 1) 1
+    :> Add (Register 3) (Register 1) (Register 3)         -- Increment loop counter
+    :> LoadIm (Register 2) loopStart
+    :> Jmp (Register 2)               -- Go back to loop start
+    :> Halt
+    :> Nil
+    where
+    haltAddr = 26
+    loopStart = 7
 
 codeRAM1 :: Vec 1024 Word
 codeRAM1 = fmap encodeInstruction program1 ++ repeat (Word 0)
 
 
-defaultDataRAM :: Vec 1024 Word
+defaultDataRAM :: Vec 2048 Word
 defaultDataRAM = repeat (Word 0)
 
 \end{code}
 
+
+\begin{code}
+
+type Logic state fromPrev toPrev fromNext toNext fromRAM toRAM
+ = (state -> fromPrev -> fromNext -> fromRAM -> (state, toPrev, toRAM), state -> toNext)
+
+connect' :: Logic sB      a2B b2A c2B b2C  ram2B         b2RAM
+         -> Logic sC      b2C c2B d2C c2D  ram2C         c2RAM
+         -> Logic (sB,sC) a2B b2A d2C c2D (ram2B,ram2C) (b2RAM,c2RAM)
+connect' (u1, f1) (u2, f2) = (u,f)
+    where
+    u (s1,s2) fromPrev1 fromNext2 (fromRAM1, fromRAM2) = ((s1',s2'),toPrev1,(toRAM1,toRAM2))
+        where
+        (s1', toPrev1, toRAM1) = u1 s1 fromPrev1 from2to1 fromRAM1
+        -- Notice: The following line doesn't rely on anything
+        -- from the above line, so there is no loop/recursion.
+        -- Information can only flow directly in one direction (from stage 2 to stage 1)
+        -- Any information from stage 1 to stage 2 has to pass through a register
+        -- (in the form of s1), so there's no recursion. If s2 relied on s1' instead of s1,
+        -- there would be recursion.
+        (s2', from2to1, toRAM2) = u2 s2 from1to2 fromNext2 fromRAM2
+        from1to2 = f1 s1
+    f (_,s2)= f2 s2
+
+type TotalState = (FetchState, (DecodeState, (ExecuteState, WriteState)))
+type TotalRAMInput = (Unused, (Word, (Unused, Word)))
+type TotalRAMOutput = (CodeRAMRequest, (Unused, (DataRAMRequest, Unused)))
+
+allConnected' :: Logic TotalState Unused Unused Unused WriteState TotalRAMInput TotalRAMOutput
+allConnected' = connect' (fetcherUpdate,  fetcherFilter)  $
+                connect' (decoderUpdate,  decoderFilter)  $
+                connect' (executerUpdate, executerFilter) $
+                         (writerUpdate,   writerFilter)
+
+block' :: (Signal Unused, Signal Unused, Signal TotalRAMInput)
+       -> (Signal Unused, Signal WriteState, Signal TotalRAMOutput)
+block' = cpuBlock totalUpdate totalFilter initialState
+    where
+    (totalUpdate, totalFilter) = allConnected'
+    initialState = ((FetchState (Ptr 0) Invalid),((DecodeState (repeat 0) Nothing),(E_Nop, W_Nop)))
+
+cpu' :: Vec n Word -> Vec m Word -> Signal WriteState
+cpu' code initialData = output
+    where
+    (_, output, cpu2ram) = block' (signal Unused, signal Unused, ram2cpu)
+    shrink = \(c,(_,(d,_))) -> (c,d)
+    expand = \(c,d) -> (Unused,(c,(Unused,d)))
+    (cpu2code, cpu2data) = (unbundle . fmap shrink) cpu2ram
+    ram2cpu = (fmap expand . bundle) (code2cpu, data2cpu)
+    code2cpu = codeRAM code cpu2code
+    data2cpu = dataRAM initialData cpu2data
+
+
+
+\end{code}
