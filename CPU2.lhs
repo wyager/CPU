@@ -507,17 +507,17 @@ connect' (u1, f1) (u2, f2) = (u,f)
     f (_,s2)= f2 s2
 
 type TotalState = (FetchState, (DecodeState, (ExecuteState, WriteState)))
-type TotalRAMInput = (Unused, (Word, (Unused, Word)))
-type TotalRAMOutput = (CodeRAMRequest, (Unused, (DataRAMRequest, Unused)))
+type RAM2CPU = (Unused, (Word, (Unused, Word)))
+type CPU2RAM = (CodeRAMRequest, (Unused, (DataRAMRequest, Unused)))
 
-allConnected' :: Logic TotalState Unused Unused Unused WriteState TotalRAMInput TotalRAMOutput
+allConnected' :: Logic TotalState Unused Unused Unused WriteState RAM2CPU CPU2RAM
 allConnected' = connect' (fetcherUpdate,  fetcherFilter)  $
                 connect' (decoderUpdate,  decoderFilter)  $
                 connect' (executerUpdate, executerFilter) $
                          (writerUpdate,   writerFilter)
 
-block' :: (Signal Unused, Signal Unused, Signal TotalRAMInput)
-       -> (Signal Unused, Signal WriteState, Signal TotalRAMOutput)
+block' :: (Signal Unused, Signal Unused, Signal RAM2CPU)
+       -> (Signal Unused, Signal WriteState, Signal CPU2RAM)
 block' = cpuBlock totalUpdate totalFilter initialState
     where
     (totalUpdate, totalFilter) = allConnected'
@@ -536,7 +536,7 @@ cpu' code initialData = output
 
 instance QC.Arbitrary Word where
     arbitrary = fmap Word QC.arbitrary
-    shrink = []
+    shrink _ = []
 
 equivalent :: Vec 128 Word -> Vec 128 Word -> Bool
 equivalent code memory = sampleN 100 (cpu code memory) == sampleN 100 (cpu' code memory)
