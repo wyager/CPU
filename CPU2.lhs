@@ -212,6 +212,10 @@ decodeReg = Register . unpack
 
 \end{code}
 
+![CPU diagram](CPU2Diagram.svg "CPU diagram")
+
+![Stage diagram](stage.svg "Stage diagram")
+
 \begin{code}
 data DtoF = D_F_Stall | D_F_Jump (Ptr CodeRAM) | D_F_None
 
@@ -225,11 +229,11 @@ cpuBlock :: (toSelf -> fromPrev -> fromNext -> fromRAM -> (state, toPrev, toRAM)
          -> state 
          -> (Signal fromPrev, Signal fromNext, Signal fromRAM)
          -> (Signal toPrev, Signal toNext, Signal toRAM)
-cpuBlock update filter initial (fromPrev, fromNext, fromRAM) = (toPrev, toNext, toRAM)
+cpuBlock update splitter initial (fromPrev, fromNext, fromRAM) = (toPrev, toNext, toRAM)
     where
     state = register initial state'
     (state', toPrev, toRAM) = unbundle (update <$> toSelf <*> fromPrev <*> fromNext <*> fromRAM)
-    (toSelf,toNext) = unbundle (filter <$> state)
+    (toSelf,toNext) = unbundle (splitter <$> state)
 
 connect :: (Signal b2ram -> Signal ram2c)              -- RAM between B and C
         -> ((Signal a2b, Signal c2b, Signal ram2b)     -- Block B
@@ -253,7 +257,7 @@ data CodeRAMRequest = CodeRAMStall | CodeRAMRead (Ptr CodeRAM)
 
 fetcher :: (Signal Unused, Signal DtoF, Signal Unused) 
         -> (Signal Unused, Signal Validity, Signal CodeRAMRequest)
-fetcher = cpuBlock fetcherUpdate fetcherFilter (FetchState (Ptr 0) Invalid) 
+fetcher = cpuBlock fetcherUpdate fetcherSplitter (FetchState (Ptr 0) Invalid) 
 fetcherUpdate :: Ptr CodeRAM -> Unused -> DtoF -> Unused -> (FetchState, Unused, CodeRAMRequest)
 fetcherUpdate ptr Unused hazard Unused = (state', Unused, request)
     where
@@ -264,8 +268,8 @@ fetcherUpdate ptr Unused hazard Unused = (state', Unused, request)
     request = case hazard of
         D_F_Stall -> CodeRAMStall
         _         -> CodeRAMRead ptr
-fetcherFilter :: FetchState -> (Ptr CodeRAM, Validity)
-fetcherFilter (FetchState pc instr) = (pc, instr)
+fetcherSplitter :: FetchState -> (Ptr CodeRAM, Validity)
+fetcherSplitter (FetchState pc instr) = (pc, instr)
 
 \end{code}
 
@@ -287,7 +291,7 @@ data EtoD = EtoD EtoDHazard (Maybe CompletedWrite)
 
 decoder :: (Signal Validity, Signal EtoD, Signal Word)
         -> (Signal DtoF, Signal (Maybe (Instruction (Unsigned 64))), Signal Unused)
-decoder = cpuBlock decoderUpdate decoderFilter (DecodeState (repeat 0) Nothing)
+decoder = cpuBlock decoderUpdate decoderSplitter (DecodeState (repeat 0) Nothing)
 
 decoderUpdate :: Vec 16 (Unsigned 64) -> Validity -> EtoD -> Word -> (DecodeState, DtoF, Unused)
 decoderUpdate regs validity eToD fromRAM = (state', dToF, Unused)
@@ -310,8 +314,8 @@ decoderUpdate regs validity eToD fromRAM = (state', dToF, Unused)
         E_D_Stall    -> D_F_Stall
         E_D_None     -> D_F_None
 
-decoderFilter :: DecodeState -> (Vec 16 (Unsigned 64), Maybe (Instruction (Unsigned 64)))
-decoderFilter (DecodeState regs instr) = (regs, instr)
+decoderSplitter :: DecodeState -> (Vec 16 (Unsigned 64), Maybe (Instruction (Unsigned 64)))
+decoderSplitter (DecodeState regs instr) = (regs, instr)
 
 \end{code}
 
@@ -332,7 +336,7 @@ data DataRAMRequest = Read (Ptr DataRAM)
 
 executer :: (Signal (Maybe (Instruction (Unsigned 64))), Signal WtoE, Signal Unused)
         -> (Signal EtoD, Signal ExecuteState, Signal DataRAMRequest)
-executer = cpuBlock executerUpdate executerFilter E_Nop
+executer = cpuBlock executerUpdate executerSplitter E_Nop
 
 executerUpdate :: Unused -> Maybe (Instruction (Unsigned 64)) -> WtoE -> Unused -> (ExecuteState, EtoD, DataRAMRequest)
 executerUpdate Unused decodedInstr (WtoE write) Unused = (state', eToD, request)
@@ -356,8 +360,8 @@ executerUpdate Unused decodedInstr (WtoE write) Unused = (state', eToD, request)
         Just (Store v ptr) -> Write (Ptr ptr) (Word v)
         _ -> Read (Ptr 0) -- Could also have a special constructor for "do nothing" if we wanted
 -- The write stage uses the entire execute state
-executerFilter :: ExecuteState -> (Unused, ExecuteState)
-executerFilter s = (Unused, s)
+executerSplitter :: ExecuteState -> (Unused, ExecuteState)
+executerSplitter s = (Unused, s)
 
 \end{code}
 
@@ -373,7 +377,7 @@ instance NFData WriteState
 
 writer :: (Signal ExecuteState, Signal Unused, Signal Word)
        -> (Signal WtoE, Signal WriteState, Signal Unused)
-writer = cpuBlock writerUpdate writerFilter W_Nop
+writer = cpuBlock writerUpdate writerSplitter W_Nop
 writerUpdate :: Unused -> ExecuteState -> Unused -> Word -> (WriteState, WtoE, Unused)
 writerUpdate Unused executeState Unused fromRAM = (state', wToE, Unused)
     where
@@ -385,8 +389,8 @@ writerUpdate Unused executeState Unused fromRAM = (state', wToE, Unused)
         E_Store r v -> WtoE (Just (CompletedWrite r v))
         E_ReadRAM r -> let Word v = fromRAM in WtoE (Just (CompletedWrite r v))
         _           -> WtoE Nothing
-writerFilter :: WriteState -> (Unused, WriteState)
-writerFilter s = (Unused, s)
+writerSplitter :: WriteState -> (Unused, WriteState)
+writerSplitter s = (Unused, s)
 
 \end{code}
 
@@ -516,16 +520,16 @@ type RAM2CPU = (Unused, (Word, (Unused, Word)))
 type CPU2RAM = (CodeRAMRequest, (Unused, (DataRAMRequest, Unused)))
 
 allConnected' :: Logic TotalState TotalToSelf Unused Unused Unused WriteState RAM2CPU CPU2RAM
-allConnected' = connect' (fetcherUpdate,  fetcherFilter)  $
-                connect' (decoderUpdate,  decoderFilter)  $
-                connect' (executerUpdate, executerFilter) $
-                         (writerUpdate,   writerFilter)
+allConnected' = connect' (fetcherUpdate,  fetcherSplitter)  $
+                connect' (decoderUpdate,  decoderSplitter)  $
+                connect' (executerUpdate, executerSplitter) $
+                         (writerUpdate,   writerSplitter)
 
 block' :: (Signal Unused, Signal Unused, Signal RAM2CPU)
        -> (Signal Unused, Signal WriteState, Signal CPU2RAM)
-block' = cpuBlock totalUpdate totalFilter initialState
+block' = cpuBlock totalUpdate totalSplitter initialState
     where
-    (totalUpdate, totalFilter) = allConnected'
+    (totalUpdate, totalSplitter) = allConnected'
     initialState = ((FetchState (Ptr 0) Invalid),((DecodeState (repeat 0) Nothing),(E_Nop, W_Nop)))
 
 cpu' :: Vec n Word -> Vec m Word -> Signal WriteState

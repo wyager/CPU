@@ -4,6 +4,8 @@
 
 === Part 1
 
+==== August 2017
+
 Today, we're going to build a simple CPU. We're going to write it in Haskell and use CLaSH to compile it to hardware.
 
 This entire webpage is a literate Haskell file. You can grab it [here](https://github.com/wyager/CPU/blob/master/CPU1.lhs).
@@ -436,19 +438,6 @@ s[2] = cycle s[1]
 ...
 ```
 
-This is what the actual circuit will end up looking like:
-
-```
- ----[cycle]<---
-|               |
-|               |
-|               |
- -->[register]--
-        ^
-        |
-      clock
-```
-
 Now we have to take the state of the CPU, extract the relevant information from the state, and output that information.
 
 \begin{code}
@@ -461,6 +450,16 @@ Every cycle, our output signal should contain the output data for the new state.
 \begin{code}
     outputSignal = fmap getOutput systemState'
 \end{code}
+
+This is what the actual circuit will end up looking like:
+
+![circuit](cpu1.svg "CPU 1 Diagram")
+
+A box with no triangle at the bottom signifies a [combinational circuit](https://en.wikipedia.org/wiki/Combinational_logic), which is some circuit that has no memory and simply computes (over the course of a few nanoseconds) some function of its input. 
+
+A box with the triangle at the bottom signifies a [register](https://en.wikipedia.org/wiki/Hardware_register), which is a piece of hardware that holds some bits of information over the course of a cycle. At the beginning of every cycle, the register reads its input, and a few nanoseconds later the input is held on the output of the register until the beginning of the next cycle. In this way, we can build circuits that remember the past. We combine pure functions with no memory (combinational circuits) with explicit state (registers). This is why Haskell is so good at representing hardware; it requires and helps you to separate these two notions.
+
+
 
 
 Let's also define an initial CPU state with all registers (including `pc`) set to zero:
