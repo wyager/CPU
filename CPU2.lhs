@@ -220,16 +220,16 @@ data FetchState = FetchState {
         instructionRAMOutputValid :: Validity
     }
 
-cpuBlock :: (state -> fromPrev -> fromNext -> fromRAM -> (state, toPrev, toRAM)) 
-         -> (state -> toNext) 
+cpuBlock :: (toSelf -> fromPrev -> fromNext -> fromRAM -> (state, toPrev, toRAM)) 
+         -> (state -> (toSelf, toNext))
          -> state 
          -> (Signal fromPrev, Signal fromNext, Signal fromRAM)
          -> (Signal toPrev, Signal toNext, Signal toRAM)
 cpuBlock update filter initial (fromPrev, fromNext, fromRAM) = (toPrev, toNext, toRAM)
     where
     state = register initial state'
-    (state', toPrev, toRAM) = unbundle (update <$> state <*> fromPrev <*> fromNext <*> fromRAM)
-    toNext = filter <$> state
+    (state', toPrev, toRAM) = unbundle (update <$> toSelf <*> fromPrev <*> fromNext <*> fromRAM)
+    (toSelf,toNext) = unbundle (filter <$> state)
 
 connect :: (Signal b2ram -> Signal ram2c)              -- RAM between B and C
         -> ((Signal a2b, Signal c2b, Signal ram2b)     -- Block B
@@ -254,18 +254,18 @@ data CodeRAMRequest = CodeRAMStall | CodeRAMRead (Ptr CodeRAM)
 fetcher :: (Signal Unused, Signal DtoF, Signal Unused) 
         -> (Signal Unused, Signal Validity, Signal CodeRAMRequest)
 fetcher = cpuBlock fetcherUpdate fetcherFilter (FetchState (Ptr 0) Invalid) 
-fetcherUpdate :: FetchState -> Unused -> DtoF -> Unused -> (FetchState, Unused, CodeRAMRequest)
-fetcherUpdate state@(FetchState ptr validity) Unused hazard Unused = (state', Unused, request)
+fetcherUpdate :: Ptr CodeRAM -> Unused -> DtoF -> Unused -> (FetchState, Unused, CodeRAMRequest)
+fetcherUpdate ptr Unused hazard Unused = (state', Unused, request)
     where
     state' = case hazard of
-        D_F_Stall     -> state
+        D_F_Stall     -> FetchState ptr  Invalid
         D_F_Jump ptr' -> FetchState ptr' Invalid
         D_F_None      -> FetchState (increment ptr) Valid
     request = case hazard of
         D_F_Stall -> CodeRAMStall
         _         -> CodeRAMRead ptr
-fetcherFilter :: FetchState -> Validity
-fetcherFilter = instructionRAMOutputValid
+fetcherFilter :: FetchState -> (Ptr CodeRAM, Validity)
+fetcherFilter (FetchState pc instr) = (pc, instr)
 
 \end{code}
 
@@ -289,13 +289,13 @@ decoder :: (Signal Validity, Signal EtoD, Signal Word)
         -> (Signal DtoF, Signal (Maybe (Instruction (Unsigned 64))), Signal Unused)
 decoder = cpuBlock decoderUpdate decoderFilter (DecodeState (repeat 0) Nothing)
 
-decoderUpdate :: DecodeState -> Validity -> EtoD -> Word -> (DecodeState, DtoF, Unused)
-decoderUpdate state validity eToD fromRAM = (state', dToF, Unused)
+decoderUpdate :: Vec 16 (Unsigned 64) -> Validity -> EtoD -> Word -> (DecodeState, DtoF, Unused)
+decoderUpdate regs validity eToD fromRAM = (state', dToF, Unused)
     where
     EtoD hazard completedWrite = eToD
     regs' = case completedWrite of
-        Nothing -> regs state
-        Just (CompletedWrite reg val) -> writeRegister (regs state) reg val
+        Nothing -> regs
+        Just (CompletedWrite reg val) -> writeRegister regs reg val
     decodedInstruction' = case hazard of
         E_D_Stall  -> Nothing
         E_D_Jump _ -> Nothing
@@ -310,8 +310,8 @@ decoderUpdate state validity eToD fromRAM = (state', dToF, Unused)
         E_D_Stall    -> D_F_Stall
         E_D_None     -> D_F_None
 
-decoderFilter :: DecodeState -> Maybe (Instruction (Unsigned 64))
-decoderFilter = decodedInstruction
+decoderFilter :: DecodeState -> (Vec 16 (Unsigned 64), Maybe (Instruction (Unsigned 64)))
+decoderFilter (DecodeState regs instr) = (regs, instr)
 
 \end{code}
 
@@ -334,8 +334,8 @@ executer :: (Signal (Maybe (Instruction (Unsigned 64))), Signal WtoE, Signal Unu
         -> (Signal EtoD, Signal ExecuteState, Signal DataRAMRequest)
 executer = cpuBlock executerUpdate executerFilter E_Nop
 
-executerUpdate :: ExecuteState -> Maybe (Instruction (Unsigned 64)) -> WtoE -> Unused -> (ExecuteState, EtoD, DataRAMRequest)
-executerUpdate _ decodedInstr (WtoE write) Unused = (state', eToD, request)
+executerUpdate :: Unused -> Maybe (Instruction (Unsigned 64)) -> WtoE -> Unused -> (ExecuteState, EtoD, DataRAMRequest)
+executerUpdate Unused decodedInstr (WtoE write) Unused = (state', eToD, request)
     where
     eToD = EtoD eToDHazard write
     (eToDHazard, state') = case decodedInstr of
@@ -356,8 +356,8 @@ executerUpdate _ decodedInstr (WtoE write) Unused = (state', eToD, request)
         Just (Store v ptr) -> Write (Ptr ptr) (Word v)
         _ -> Read (Ptr 0) -- Could also have a special constructor for "do nothing" if we wanted
 -- The write stage uses the entire execute state
-executerFilter :: ExecuteState -> ExecuteState
-executerFilter s = s
+executerFilter :: ExecuteState -> (Unused, ExecuteState)
+executerFilter s = (Unused, s)
 
 \end{code}
 
@@ -374,8 +374,8 @@ instance NFData WriteState
 writer :: (Signal ExecuteState, Signal Unused, Signal Word)
        -> (Signal WtoE, Signal WriteState, Signal Unused)
 writer = cpuBlock writerUpdate writerFilter W_Nop
-writerUpdate :: WriteState -> ExecuteState -> Unused -> Word -> (WriteState, WtoE, Unused)
-writerUpdate _ executeState Unused fromRAM = (state', wToE, Unused)
+writerUpdate :: Unused -> ExecuteState -> Unused -> Word -> (WriteState, WtoE, Unused)
+writerUpdate Unused executeState Unused fromRAM = (state', wToE, Unused)
     where
     state' = case executeState of
         E_Out v -> W_Out v
@@ -385,8 +385,8 @@ writerUpdate _ executeState Unused fromRAM = (state', wToE, Unused)
         E_Store r v -> WtoE (Just (CompletedWrite r v))
         E_ReadRAM r -> let Word v = fromRAM in WtoE (Just (CompletedWrite r v))
         _           -> WtoE Nothing
-writerFilter :: WriteState -> WriteState
-writerFilter s = s
+writerFilter :: WriteState -> (Unused, WriteState)
+writerFilter s = (Unused, s)
 
 \end{code}
 
@@ -485,32 +485,37 @@ defaultDataRAM = repeat (Word 0)
 
 \begin{code}
 
-type Logic state fromPrev toPrev fromNext toNext fromRAM toRAM
- = (state -> fromPrev -> fromNext -> fromRAM -> (state, toPrev, toRAM), state -> toNext)
+type Logic state toSelf fromPrev toPrev fromNext toNext fromRAM toRAM
+ = (toSelf -> fromPrev -> fromNext -> fromRAM -> (state, toPrev, toRAM), state -> (toSelf, toNext))
 
-connect' :: Logic sB      a2B b2A c2B b2C  ram2B         b2RAM
-         -> Logic sC      b2C c2B d2C c2D  ram2C         c2RAM
-         -> Logic (sB,sC) a2B b2A d2C c2D (ram2B,ram2C) (b2RAM,c2RAM)
+connect' :: Logic sb      b2b           a2b b2a c2b b2c  ram2b         b2RAM
+         -> Logic sc      c2c           b2c c2b d2c c2d  ram2c         c2RAM
+         -> Logic (sb,sc) (b2b,b2c,c2c) a2b b2a d2c c2d (ram2b,ram2c) (b2RAM,c2RAM)
 connect' (u1, f1) (u2, f2) = (u,f)
     where
-    u (s1,s2) fromPrev1 fromNext2 (fromRAM1, fromRAM2) = ((s1',s2'),toPrev1,(toRAM1,toRAM2))
+    u (from1to1, from1to2, from2to2) fromPrev1 fromNext2 (fromRAM1, fromRAM2) = ((s1',s2'),toPrev1,(toRAM1,toRAM2))
         where
-        (s1', toPrev1, toRAM1) = u1 s1 fromPrev1 from2to1 fromRAM1
+        (s1', toPrev1, toRAM1) = u1 from1to1 fromPrev1 from2to1 fromRAM1
         -- Notice: The following line doesn't rely on anything
         -- from the above line, so there is no loop/recursion.
         -- Information can only flow directly in one direction (from stage 2 to stage 1)
         -- Any information from stage 1 to stage 2 has to pass through a register
         -- (in the form of s1), so there's no recursion. If s2 relied on s1' instead of s1,
         -- there would be recursion.
-        (s2', from2to1, toRAM2) = u2 s2 from1to2 fromNext2 fromRAM2
-        from1to2 = f1 s1
-    f (_,s2)= f2 s2
+        (s2', from2to1, toRAM2) = u2 from2to2 from1to2 fromNext2 fromRAM2
+    f (s1,s2)= ((from1to1, from1to2, from2to2),from2to3)
+        where
+        (from1to1,from1to2) = f1 s1
+        (from2to2,from2to3) = f2 s2
 
+type TotalToSelf =  (Ptr CodeRAM, Validity,
+                        (Vec 16 (Unsigned 64), Maybe (Instruction (Unsigned 64)),
+                         (Unused, ExecuteState, Unused)))
 type TotalState = (FetchState, (DecodeState, (ExecuteState, WriteState)))
 type RAM2CPU = (Unused, (Word, (Unused, Word)))
 type CPU2RAM = (CodeRAMRequest, (Unused, (DataRAMRequest, Unused)))
 
-allConnected' :: Logic TotalState Unused Unused Unused WriteState RAM2CPU CPU2RAM
+allConnected' :: Logic TotalState TotalToSelf Unused Unused Unused WriteState RAM2CPU CPU2RAM
 allConnected' = connect' (fetcherUpdate,  fetcherFilter)  $
                 connect' (decoderUpdate,  decoderFilter)  $
                 connect' (executerUpdate, executerFilter) $
