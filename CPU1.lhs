@@ -12,7 +12,7 @@ This entire webpage is a literate Haskell file. You can grab it [here](https://g
 
 To load the file into an interactive REPL, [install CLaSH](http://www.clash-lang.org) and run `clashi CPU1.lhs`.
 
-If you want to simulate the Verilog hardware code or actually put it on an FPGA, there are more detailed instructions towards the end of the tutorial.
+If you want to simulate the Verilog hardware code or put it on an FPGA, there are more detailed instructions towards the end of the tutorial.
 
 
 === About This CPU
@@ -48,9 +48,9 @@ import CLaSH.Promoted.Nat.Literals as Nat
 import CLaSH.Signal (Signal, register, sample)
 
 -- Plain old Haskell stuff
-import Prelude (Show, print, (+), (-), (*), (==), 
-    ($), (.), filter, take, fmap, mapM_,
-    Bool(True,False), not, Maybe(Just,Nothing))
+import Prelude ((+), (-), (*), (==), ($), (.), 
+    filter, take, fmap, not, error,
+    Show,  Bool(True,False), Maybe(Just,Nothing))
 
 -- Used to make sure that something is fully evaluated.
 -- Good for making sure that our circuit 
@@ -183,11 +183,11 @@ We'll write a few helper functions that let us perform basic state operations, l
 
 \begin{code}
 readRegister :: Registers -> Register -> Unsigned 64
-readRegister (Registers r1 r2 r3 r4 _) reg = case reg of
-    R1 -> r1
-    R2 -> r2
-    R3 -> r3
-    R4 -> r4
+readRegister (Registers reg1 reg2 reg3 reg4 _) reg = case reg of
+    R1 -> reg1
+    R2 -> reg2
+    R3 -> reg3
+    R4 -> reg4
 
 writeRegister :: Registers -> Register -> Unsigned 64 -> Registers
 writeRegister regs reg word = case reg of
@@ -231,10 +231,10 @@ encodeInstruction instr = Word $ unpack $ case instr of
     JmpZ   z d -> tag 7 ++# encodeReg z ++# encodeReg d                 ++# 0
     Out      v -> tag 8 ++# encodeReg v                                 ++# 0
     Halt       -> tag 9                                                 ++# 0
-
--- This is just for clarity, and to specify how many bits a tag should be.
-tag :: BitVector 4 -> BitVector 4
-tag x = x
+    where
+    -- This is just for clarity, and to specify how many bits a tag should be.
+    tag :: BitVector 4 -> BitVector 4
+    tag x = x
 
 -- We could have up to 16 regs (0 through 15),
 --  but we're only using 4 for now.
@@ -256,6 +256,7 @@ decodeInstruction (Word val) = case tag of
     7 -> JmpZ   a b
     8 -> Out    a
     9 -> Halt
+    _ -> error "Undefined instruction"
     where
     tag = slice Nat.d63 Nat.d60 val
     a   = decodeReg $ slice Nat.d59 Nat.d56 val
@@ -268,6 +269,7 @@ decodeReg 1 = R1
 decodeReg 2 = R2
 decodeReg 3 = R3
 decodeReg 4 = R4
+decodeReg _ = error "Invalid register"
 
 \end{code}
 
