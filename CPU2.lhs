@@ -1,3 +1,5 @@
+WORK IN PROGRESS! MAY CHANGE! 
+
 === [Blog](https://yager.io)
 
 == Building a CPU
@@ -29,7 +31,8 @@ We will implement a branch predictor to help our CPU jump efficiently.
 First we're just going to import a bunch of stuff. 
 
 \begin{code}
--- Allows GHC to automatically write code for mapping over register values
+-- Allows GHC to automatically write code for mapping over register values,
+-- and to automatically write code to fully evaluate writer state outputs.
 {-# LANGUAGE DeriveFunctor, DeriveGeneric #-}
 
 module CPU where
@@ -76,9 +79,9 @@ Some wrapper types, as described in part 1:
 
 \begin{code}
 data RAMType = DataRAM | CodeRAM
-data Ptr (ram :: RAMType) = Ptr (Unsigned 64) deriving (Show)
-data Word = Word (Unsigned 64) deriving Show
-data Output = Output (Unsigned 64) deriving Show
+newtype Ptr (ram :: RAMType) = Ptr (Unsigned 64) deriving (Show)
+newtype Word = Word (Unsigned 64) deriving Show
+newtype Output = Output (Unsigned 64) deriving Show
 instance NFData Output where
     rnf (Output n) = rnf n
 \end{code}
@@ -212,9 +215,9 @@ decodeReg = Register . unpack
 
 \end{code}
 
-![CPU diagram](CPU2Diagram.svg "CPU diagram")
+![](CPU2Diagram.svg "CPU diagram")
 
-![Stage diagram](stage.svg "Stage diagram")
+![](stage.svg "Stage diagram")
 
 \begin{code}
 data DtoF = D_F_Stall | D_F_Jump (Ptr CodeRAM) | D_F_None
@@ -329,7 +332,7 @@ data ExecuteState
     | E_Out (Unsigned 64)
     | E_Halt
 
-data WtoE = WtoE (Maybe CompletedWrite)
+data WtoE = W_E_Write (Maybe CompletedWrite) | W_E_Halt
 
 data DataRAMRequest = Read (Ptr DataRAM)
                     | Write (Ptr DataRAM) Word
@@ -339,7 +342,8 @@ executer :: (Signal (Maybe (Instruction (Unsigned 64))), Signal WtoE, Signal Unu
 executer = cpuBlock executerUpdate executerSplitter E_Nop
 
 executerUpdate :: Unused -> Maybe (Instruction (Unsigned 64)) -> WtoE -> Unused -> (ExecuteState, EtoD, DataRAMRequest)
-executerUpdate Unused decodedInstr (WtoE write) Unused = (state', eToD, request)
+executerUpdate Unused _             W_E_Halt         Unused = (E_Halt, (EtoD E_D_Stall Nothing), Read (Ptr 0))
+executerUpdate Unused decodedInstr (W_E_Write write) Unused = (state', eToD, request)
     where
     eToD = EtoD eToDHazard write
     (eToDHazard, state') = case decodedInstr of
@@ -367,6 +371,8 @@ executerSplitter s = (Unused, s)
 
 \begin{code}
 
+data IsHalted = IsHalted | NotHalted
+
 data WriteState
     = W_Nop
     | W_Out (Unsigned 64)
@@ -378,19 +384,21 @@ instance NFData WriteState
 writer :: (Signal ExecuteState, Signal Unused, Signal Word)
        -> (Signal WtoE, Signal WriteState, Signal Unused)
 writer = cpuBlock writerUpdate writerSplitter W_Nop
-writerUpdate :: Unused -> ExecuteState -> Unused -> Word -> (WriteState, WtoE, Unused)
-writerUpdate Unused executeState Unused fromRAM = (state', wToE, Unused)
+writerUpdate :: IsHalted -> ExecuteState -> Unused -> Word -> (WriteState, WtoE, Unused)
+writerUpdate IsHalted  _            Unused _       = (W_Halt, W_E_Halt, Unused)
+writerUpdate NotHalted executeState Unused fromRAM = (state', wToE, Unused)
     where
     state' = case executeState of
         E_Out v -> W_Out v
         E_Halt  -> W_Halt
         _       -> W_Nop
     wToE = case executeState of
-        E_Store r v -> WtoE (Just (CompletedWrite r v))
-        E_ReadRAM r -> let Word v = fromRAM in WtoE (Just (CompletedWrite r v))
-        _           -> WtoE Nothing
-writerSplitter :: WriteState -> (Unused, WriteState)
-writerSplitter s = (Unused, s)
+        E_Store r v -> W_E_Write (Just (CompletedWrite r v))
+                        --- TESTME remove this
+        E_ReadRAM r -> let Word v = fromRAM in W_E_Write (Just (CompletedWrite r v))
+        _           -> W_E_Write Nothing
+writerSplitter :: WriteState -> (IsHalted, WriteState)
+writerSplitter s = (if s == W_Halt then IsHalted else NotHalted, s)
 
 \end{code}
 
@@ -514,7 +522,7 @@ connect' (u1, f1) (u2, f2) = (u,f)
 
 type TotalToSelf =  (Ptr CodeRAM, Validity,
                         (Vec 16 (Unsigned 64), Maybe (Instruction (Unsigned 64)),
-                         (Unused, ExecuteState, Unused)))
+                         (Unused, ExecuteState, IsHalted)))
 type TotalState = (FetchState, (DecodeState, (ExecuteState, WriteState)))
 type RAM2CPU = (Unused, (Word, (Unused, Word)))
 type CPU2RAM = (CodeRAMRequest, (Unused, (DataRAMRequest, Unused)))

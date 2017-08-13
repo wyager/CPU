@@ -30,6 +30,10 @@ The fact that we're writing this CPU in Haskell instead of in an HDL like Verilo
 First we're just going to import a bunch of stuff. 
 
 \begin{code}
+-- Allows the compiler to auto-write code for wrapper types.
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
+-- The name of our module
 module CPU1 where
 
 -- CLaSH-provided hardware stuff
@@ -50,8 +54,9 @@ import Prelude (Show, print, (+), (-), (*), (==),
 
 -- Used to make sure that something is fully evaluated.
 -- Good for making sure that our circuit 
--- doesn't have any undefined behavior.
-import Control.DeepSeq (NFData, rnf)
+-- doesn't have any undefined behavior by forcing the full
+-- evaluation of outputs.
+import Control.DeepSeq (NFData)
 \end{code}
 
 
@@ -66,23 +71,21 @@ data Register = R1 | R2 | R3 | R4 deriving Show
 We'll define a wrapper type for 64-bit memory addresses:
 
 \begin{code}
-data Ptr = Ptr (Unsigned 64) deriving (Show)
+newtype Ptr = Ptr (Unsigned 64) deriving (Show)
 \end{code}
 
 A wrapper type for 64-bit memory words:
 
 \begin{code}
-data Word = Word (Unsigned 64) deriving Show
+newtype Word = Word (Unsigned 64) deriving Show
 \end{code}
 
 As well as a wrapper type for 64-bit I/O output:
 
 \begin{code}
-data Output = Output (Unsigned 64) deriving Show
 -- Making Output an instance of NFData allows CLaSH 
 --  to force full evaluation during testing.
-instance NFData Output where
-    rnf (Output n) = rnf n
+newtype Output = Output (Unsigned 64) deriving (Show, NFData)
 \end{code}
 
 These all have the same underlying 64-bit representation, so the wrapper is just to help us keep track of whether something is a value or a pointer to a value or whatever.
@@ -403,6 +406,32 @@ output (CPUState (Outputting output) _) = Just output
 output _                                = Nothing
 \end{code}
 
+
+==== Interlude: Registers
+
+There are, in the context of digital circuitry, two kinds of circuit elements: [combinational circuits](https://en.wikipedia.org/wiki/Combinational_logic) and [registers](https://en.wikipedia.org/wiki/Hardware_register).
+
+Combinational circuits are circuits which don't have any kind of memory. You put some values on their input bits, over a few nanoseconds electrical signals propagate through the transistors, and then there is some value held on the output bits. In other words, the circuit calculates a pure function of its input, with no internal state.
+
+Registers are bits of hardware that hold some information for the duration of a clock cycle. At the beginning of every cycle, the register reads its input value, and a few nanoseconds later the value is held on the output of the register until the beginning of the next cycle. Registers form the basis of memory in digital circuits.
+
+To build circuits that can remember the past, we combine pure functions (combinational circuits) with explicit state (registers). One of the reasons Haskell is so good at representing hardware is that it already requires and helps you to make this distinction, so it's relatively straightforward to transform Haskell code into hardware. 
+
+In diagrams, we represent combinational circuits (pure functions) as boxes, like so:
+
+![](combinational.svg "Combinational circuit")
+
+`f` is the name of the function evaluated by the circuit, and the various arrows coming in and out of the box are the function's inputs and outputs. 
+
+We represent registers as rectangles with a triangle, like so:
+
+![](register.svg "Register")
+
+The triangle is often connected to a clock signal, but in this series everything will use the same clock signal so we'll leave that implicit.
+
+
+OK, now that we've covered a bit of how things are actually represented in hardware:
+
 ==== Hardware Structure
 
 Now we're going to define how the CPU lives in hardware. 
@@ -415,15 +444,15 @@ cpuHardware initialCPUState initialRAM = outputSignal
     where
 \end{code}
 
-First, we're going to put the CPU state and RAM contents into a hardware register, which is composed of transistor-level memory cells. CLaSH provides a `register` function which takes the initial register contents and the input signal to the register (which the register reads into itself at the start of every clock cycle), and returns the output signal of the register (which is just a copy of the register's contents).
-
-(Note: While registers are a kind of hardware-level memory, they are different from RAM. In particular, they are much faster and much more expensive. At the transistor level, they are usually built out of D-type flip-flops.)
+First, we're going to put the CPU state and RAM contents into a hardware register, which (as described above) is a hardware-level memory cell. CLaSH provides a `register` function which takes the initial register contents and the input signal to the register (which the register reads into itself at the start of every clock cycle), and returns the output signal of the register (which is just a copy of the register's contents).
 
 \begin{code}
     systemState = register (initialCPUState, initialRAM) systemState'
 \end{code}
 
-Every cycle, we are going to replace the old `systemState` with a new state, which is defined as the `cycle` function applied to the old `systemState`.
+In read life, RAM is entirely different from register memory; register memory is much faster, but also much more expensive and less space-efficient. Storing our "RAM" in a register is just a pedagogical shortcut for this first installment.
+
+Every cycle, the register replaces the old `systemState` with `systemState'`, which is defined as the `cycle` function applied to the old `systemState`.
 
 \begin{code}
     systemState' = fmap cycle systemState
@@ -453,14 +482,7 @@ Every cycle, our output signal should contain the output data for the new state.
 
 This is what the actual circuit will end up looking like:
 
-![circuit](cpu1.svg "CPU 1 Diagram")
-
-A box with no triangle at the bottom signifies a [combinational circuit](https://en.wikipedia.org/wiki/Combinational_logic), which is some circuit that has no memory and simply computes (over the course of a few nanoseconds) some function of its input. 
-
-A box with the triangle at the bottom signifies a [register](https://en.wikipedia.org/wiki/Hardware_register), which is a piece of hardware that holds some bits of information over the course of a cycle. At the beginning of every cycle, the register reads its input, and a few nanoseconds later the input is held on the output of the register until the beginning of the next cycle. In this way, we can build circuits that remember the past. We combine pure functions with no memory (combinational circuits) with explicit state (registers). This is why Haskell is so good at representing hardware; it requires and helps you to separate these two notions.
-
-
-
+![](cpu1.svg "CPU 1 Diagram")
 
 Let's also define an initial CPU state with all registers (including `pc`) set to zero:
 
