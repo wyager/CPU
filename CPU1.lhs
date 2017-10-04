@@ -1,14 +1,14 @@
 === [Blog](https://yager.io)
 
-== Building a CPU
+== Building a CPU with Haskell
 
 === Part 1
 
-==== August 2017
+==== October 2017
 
 Today, we're going to build a simple CPU. We're going to write it in Haskell and use CLaSH to compile it to hardware.
 
-This entire webpage is a literate Haskell file. You can grab it [here](https://github.com/wyager/CPU/blob/master/CPU1.lhs).
+This entire webpage is a literate Haskell file. You can see it [here on Github](https://github.com/wyager/CPU/blob/master/CPU1.lhs).
 
 To load the file into an interactive REPL, [install CLaSH](http://www.clash-lang.org) and run `clashi CPU1.lhs`.
 
@@ -327,7 +327,7 @@ If the CPU is currently `ExecutingInstruction`, we inspect the instruction and p
 We don't have to actually implement integer addition, subtraction, and multiplication ourselves at the circuit level; these are pre-defined primitives in HDLs that hardware compilers know how to optimize aggressively.
 
 
-For `Load` and `Store`, we will switch to the `ReadingMemory`/`WritingMemory` states. This isn't strictly necessary in our example hardware, as we could perform a load or store in the same cycle as `ExecutingInstruction`. However, I want to get us used to the idea of memory operations beign slow and requiring special consideration.
+For `Load` and `Store`, we will switch to the `ReadingMemory`/`WritingMemory` states. This isn't strictly necessary in our example hardware, as we could perform a load or store in the same cycle as `ExecutingInstruction`. However, I want to get us used to the idea of memory operations being slow and requiring special consideration.
 
 
 \begin{code}
@@ -415,9 +415,9 @@ There are, in the context of digital circuitry, two kinds of circuit elements: [
 
 Combinational circuits are circuits which don't have any kind of memory. You put some values on their input bits, over a few nanoseconds electrical signals propagate through the transistors, and then there is some value held on the output bits. In other words, the circuit calculates a pure function of its input, with no internal state.
 
-Registers are bits of hardware that hold some information for the duration of a clock cycle. At the beginning of every cycle, the register reads its input value, and a few nanoseconds later the value is held on the output of the register until the beginning of the next cycle. Registers form the basis of memory in digital circuits.
+Registers are bits of hardware that hold some information for the duration of a clock cycle. At the beginning of the clock cycle, the register reads its input value, and a few nanoseconds later the value is held on the output of the register. This repeats every clock cycle. Registers form the basis of memory in digital circuits.
 
-To build circuits that can remember the past, we combine pure functions (combinational circuits) with explicit state (registers). One of the reasons Haskell is so good at representing hardware is that it already requires and helps you to make this distinction, so it's relatively straightforward to transform Haskell code into hardware. 
+To build circuits that can remember the past, we combine pure functions (combinational circuits) with explicit state (registers). One of the reasons Haskell is so good at representing hardware is that it already requires and helps you to make this distinction.
 
 In diagrams, we represent combinational circuits (pure functions) as boxes, like so:
 
@@ -452,7 +452,7 @@ First, we're going to put the CPU state and RAM contents into a hardware registe
     systemState = register (initialCPUState, initialRAM) systemState'
 \end{code}
 
-In read life, RAM is entirely different from register memory; register memory is much faster, but also much more expensive and less space-efficient. Storing our "RAM" in a register is just a pedagogical shortcut for this first installment.
+In real life, RAM is entirely different from register memory; register memory is much faster, but also much more expensive and less space-efficient. Storing our "RAM" in a register is just a pedagogical shortcut for this first installment.
 
 Every cycle, the register replaces the old `systemState` with `systemState'`, which is defined as the `cycle` function applied to the old `systemState`.
 
@@ -542,9 +542,9 @@ The CPU starts out in `LoadingInstruction`, so it shouldn't output anything the 
 
 Then, for each `Out` instruction, the CPU has to go through a `LoadingInstruction`, then an `ExecutingInstruction`, then an `Outputting` state. So for every `Out`, there should be two cycles with no output and one cycle with an output. So we should spend 9 cycles on `Out`s.
 
-Then, for `Halt`, we have to go through `LoadingInstruction`, `ExecutingInstruction`, and then finally to `Halt`. So this should take a total of 3 instructions.
+Then, for `Halt`, we have to go through `LoadingInstruction`, `ExecutingInstruction`, and then finally to `Halt`. So this should take a total of 3 cycles.
 
-The total, then, is 17 instructions for this program to execute. On the 17th instruction, the halt bit should be `True`, and it should stay that way.
+The total, then, is 17 cycles for this program to execute. On the 17th cycle, the halt bit should be `True`, and it should stay that way.
 
 Indeed, if we type `mapM_ print simpleProgramOutput` at our interactive prompt, we get
 
